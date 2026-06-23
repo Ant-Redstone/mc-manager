@@ -31,7 +31,7 @@ func StartServerHandler(c *gin.Context) {
 
 	if !utils.FileExists("./minecraft-server/server.jar") {
 		log.Printf("server.jar not found, downloading latest")
-		err := services.DownloadLatestServerJar("./minecraft-server/server.jar")
+		err := services.DownloadLatestServerJar("./minecraft-server/server.jar", req.ReleaseVersion)
 		if err != nil {
 			log.Printf("failed to download server.jar: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

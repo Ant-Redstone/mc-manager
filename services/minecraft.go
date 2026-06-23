@@ -12,7 +12,7 @@ import (
 	"github.com/lomokwa/mc-manager/utils"
 )
 
-func DownloadLatestServerJar(destPath string) error {
+func DownloadLatestServerJar(destPath string, releaseVersion string) error {
 	log.Printf("downloading version manifest")
 	res, err := http.Get("https://launchermeta.mojang.com/mc/game/version_manifest.json")
 	if err != nil {
@@ -37,11 +37,16 @@ func DownloadLatestServerJar(destPath string) error {
 		return fmt.Errorf("failed to decode version manifest")
 	}
 
-	latestId := manifest.Latest.Release
+	var releaseId string
+	if releaseVersion != "" {
+		releaseId = releaseVersion
+	} else {
+		releaseId = manifest.Latest.Release
+	}
 
 	var versionUrl string
 	for _, version := range manifest.Versions {
-		if version.ID == latestId {
+		if version.ID == releaseId {
 			versionUrl = version.URL
 			break
 		}
@@ -73,7 +78,7 @@ func DownloadLatestServerJar(destPath string) error {
 	serverJarUrl := versionDetails.Downloads.Server.URL
 
 	log.Printf("downloading server jar to %s", destPath)
-	err = utils.DownloadFile(serverJarUrl, "./minecraft-server/server.jar")
+	err = utils.DownloadFile(serverJarUrl, destPath)
 	if err != nil {
 		return fmt.Errorf("failed to download server.jar: %s", err)
 	}
