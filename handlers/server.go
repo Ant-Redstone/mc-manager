@@ -29,6 +29,11 @@ func StartServerHandler(c *gin.Context) {
 		return
 	}
 
+	if err := types.ValidateServerProperties(req.Properties); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	if !utils.FileExists("./minecraft-server/server.jar") {
 		log.Printf("server.jar not found, downloading latest")
 		err := services.DownloadLatestServerJar("./minecraft-server/server.jar", req.ReleaseVersion)
