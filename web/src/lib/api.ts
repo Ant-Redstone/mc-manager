@@ -50,7 +50,11 @@ export function getApiBase(): string {
 }
 
 export function setApiBase(base: string): void {
-  localStorage.setItem(BASE_STORAGE, base.replace(/\/+$/, ''))
+  let b = base.trim().replace(/\/+$/, '')
+  // Default a bare host (e.g. "mine.lomokwa.com") to https, otherwise the
+  // value is treated as a relative path and the request hits this origin.
+  if (b && !/^[a-z]+:\/\//i.test(b)) b = `https://${b}`
+  localStorage.setItem(BASE_STORAGE, b)
 }
 
 export function clearConfig(): void {
