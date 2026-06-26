@@ -57,7 +57,10 @@ export function usePlayers(enabled: boolean) {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      setPlayers(await listPlayers())
+      const data = await listPlayers()
+      // The API should return an array, but guard against a non-array body
+      // (e.g. data: null) so a malformed response can't crash the render.
+      setPlayers(Array.isArray(data) ? data : [])
       setError(null)
     } catch (err) {
       if (err instanceof ApiError && err.status === 500) {

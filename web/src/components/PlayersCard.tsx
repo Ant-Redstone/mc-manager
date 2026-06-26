@@ -17,7 +17,7 @@ export function PlayersCard({
   error: string | null
   onRefresh: () => void
 }) {
-  const sorted = [...players].sort(
+  const sorted = (Array.isArray(players) ? players : []).slice().sort(
     (a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name),
   )
 
