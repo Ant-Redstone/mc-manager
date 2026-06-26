@@ -1,5 +1,4 @@
 import { useCallback, useState } from 'react'
-import { AnimatePresence } from 'framer-motion'
 import { clearConfig, getApiKey } from './lib/api'
 import { Background } from './components/Background'
 import { ConnectScreen } from './components/ConnectScreen'
@@ -14,16 +13,19 @@ export default function App() {
     setConnected(false)
   }, [])
 
+  // NOTE: rendered as a plain conditional rather than wrapped in
+  // <AnimatePresence mode="wait">. With React 19 + framer-motion the
+  // "wait" exit of one custom-component screen didn't complete, so the
+  // incoming screen never mounted (blank after clicking Connect). Each
+  // screen still plays its own entrance animation on mount.
   return (
     <>
       <Background />
-      <AnimatePresence mode="wait">
-        {connected ? (
-          <Dashboard key="dash" onDisconnect={handleDisconnect} />
-        ) : (
-          <ConnectScreen key="connect" onConnect={handleConnect} />
-        )}
-      </AnimatePresence>
+      {connected ? (
+        <Dashboard onDisconnect={handleDisconnect} />
+      ) : (
+        <ConnectScreen onConnect={handleConnect} />
+      )}
     </>
   )
 }
