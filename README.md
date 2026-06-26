@@ -1,7 +1,7 @@
 # MC Manager
 MC Manager is a tool for managing Minecraft servers, built with my homelab in mind. It allows you to easily create, manage, and monitor minecraft servers from a web interface or command line.
 
-Web interface not yet implemented. Will be added once the API is in a reasonably ready state.
+The web interface — a React + TypeScript + Vite app — lives in [`web/`](web/): server status, start/stop, a live console, and the player list. See [`web/README.md`](web/README.md) to run it.
 
 ## Tech Requirements / Stack
 - Go 1.23+
