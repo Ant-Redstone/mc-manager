@@ -2,6 +2,7 @@ package services
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"os"
 	"strings"
@@ -12,6 +13,16 @@ import (
 )
 
 const logPollInterval = 200 * time.Millisecond
+
+const (
+	// backlogMaxLines matches the hub's replay buffer size — seeding more
+	// than the hub can hold would just be dropped again on subscribe.
+	backlogMaxLines = 200
+	// backlogWindowBytes bounds how much of a large log is read to find those
+	// lines. 256 KiB comfortably covers 200 Minecraft log lines (~100 bytes
+	// each is typical; even pathological stack traces fit).
+	backlogWindowBytes = 256 * 1024
+)
 
 var (
 	tailHub  *types.LogHub
@@ -52,11 +63,13 @@ func tailLoop() {
 		partial []byte
 	)
 
-	// Seek to the end only if the file already exists right now — i.e. we're
-	// attaching to a server that may already be running, so its prior output
-	// shouldn't replay. A file that doesn't exist yet is a fresh session:
-	// read it from the start once it appears, so the "Done" line isn't missed.
-	seekToEndOnOpen := fileExists(LatestLogPath)
+	// If the file already exists right now, we're attaching to a server that
+	// may already be running — seed the hub's replay buffer with the tail of
+	// its existing output (so a console opened right after an API restart is
+	// never blank while the JVM sits mid-session), then continue tailing from
+	// there. A file that doesn't exist yet is a fresh session: read it from
+	// the start once it appears, so the "Done" line isn't missed.
+	seedBacklogOnOpen := fileExists(LatestLogPath)
 
 	openCurrent := func() bool {
 		nf, err := os.Open(LatestLogPath)
@@ -68,9 +81,11 @@ func tailLoop() {
 			nf.Close()
 			return false
 		}
-		if seekToEndOnOpen {
-			nf.Seek(0, io.SeekEnd)
-			seekToEndOnOpen = false
+		if seedBacklogOnOpen {
+			for _, line := range readBacklog(nf) {
+				tailHub.Broadcast(line)
+			}
+			seedBacklogOnOpen = false
 		}
 		f, reader, info, partial = nf, bufio.NewReader(nf), fi, nil
 		return true
@@ -105,6 +120,63 @@ func tailLoop() {
 		}
 		time.Sleep(logPollInterval)
 	}
+}
+
+// readBacklog returns up to backlogMaxLines complete lines from the end of f,
+// reading at most backlogWindowBytes, and positions f so tailing resumes
+// exactly where the returned lines stop: at EOF when the file ends in a
+// newline, or at the start of the trailing partial line the JVM is still
+// writing — that way the partial is later emitted once, whole, by the normal
+// tail loop instead of being split across the seed and the tail.
+func readBacklog(f *os.File) []string {
+	fi, err := f.Stat()
+	if err != nil {
+		f.Seek(0, io.SeekEnd)
+		return nil
+	}
+
+	start := fi.Size() - backlogWindowBytes
+	windowTruncated := start > 0
+	if start < 0 {
+		start = 0
+	}
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		f.Seek(0, io.SeekEnd)
+		return nil
+	}
+	data, err := io.ReadAll(f) // leaves the offset at EOF
+	if err != nil {
+		f.Seek(0, io.SeekEnd)
+		return nil
+	}
+
+	lastNL := bytes.LastIndexByte(data, '\n')
+	if lastNL < 0 {
+		// No complete line in the window. A small file whose first line is
+		// still being written: rewind so the tail loop emits it whole later.
+		// (With windowTruncated this would be one >256KiB line — degenerate;
+		// leaving the offset at EOF just skips the unreadable fragment.)
+		if !windowTruncated {
+			f.Seek(start, io.SeekStart)
+		}
+		return nil
+	}
+	if lastNL < len(data)-1 {
+		// Trailing partial line: hand it back to the tail loop.
+		f.Seek(start+int64(lastNL)+1, io.SeekStart)
+	}
+
+	lines := strings.Split(string(data[:lastNL]), "\n")
+	if windowTruncated && len(lines) > 0 {
+		lines = lines[1:] // the window almost certainly opened mid-line
+	}
+	if len(lines) > backlogMaxLines {
+		lines = lines[len(lines)-backlogMaxLines:]
+	}
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], "\r")
+	}
+	return lines
 }
 
 func rotated(f *os.File, openedInfo os.FileInfo) bool {
