@@ -130,3 +130,23 @@ func LoadRuntimes() error {
 func DefaultRuntime() *ServerRuntime {
 	return getOrCreateRuntime(DefaultServerID, ServerDir)
 }
+
+// RuntimeForID resolves id to its *ServerRuntime, the way Phase 3's
+// middleware.ResolveServer turns a request's :sid into the runtime a
+// namespaced handler operates on (see PLAN-multi-server.md D3/D4).
+//
+// Security: id is used ONLY as a lookup key into GetServer's parameterized
+// query -- never as, or as part of, a filesystem path. The Dir on the
+// returned runtime always comes from the matched row's own dir column, not
+// from id itself, so a traversal-shaped id (e.g. "../../etc") simply fails
+// to match any row and comes back as GetServer's ordinary "not found" error
+// -- there is no code path where such a string ever reaches the filesystem.
+// Unlike DefaultRuntime, this never fabricates a runtime for an id that
+// doesn't exist in the registry.
+func RuntimeForID(id string) (*ServerRuntime, error) {
+	s, err := GetServer(id)
+	if err != nil {
+		return nil, err
+	}
+	return getOrCreateRuntime(s.ID, s.Dir), nil
+}

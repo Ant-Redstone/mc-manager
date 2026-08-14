@@ -28,7 +28,14 @@ func (rt *ServerRuntime) SendCommand(cmd string) error {
 	return writeFifo(rt.ConsoleFifoPath(), cmd+"\n")
 }
 
-func (rt *ServerRuntime) readStatus() (types.ServerRuntimeStatus, bool) {
+// ReadStatus reads and decodes this runtime's raw status file as
+// mc-supervisor last wrote it. Exported (not just an IsServerRunning
+// implementation detail) because handlers/servers.go's server list needs
+// the PID/Since fields too, not just the running bool -- see
+// handlers.statusItemFor. ok is false for a missing or corrupt file, which
+// simply means "no status to report" rather than an error worth failing a
+// request over.
+func (rt *ServerRuntime) ReadStatus() (types.ServerRuntimeStatus, bool) {
 	b, err := os.ReadFile(rt.StatusFilePath())
 	if err != nil {
 		return types.ServerRuntimeStatus{}, false
@@ -45,7 +52,7 @@ func (rt *ServerRuntime) readStatus() (types.ServerRuntimeStatus, bool) {
 // itself is dead, not just the JVM) is treated as not-running, so a crashed
 // container can never be mistaken for a healthy server.
 func (rt *ServerRuntime) IsServerRunning() bool {
-	st, ok := rt.readStatus()
+	st, ok := rt.ReadStatus()
 	if !ok || !st.Running {
 		return false
 	}

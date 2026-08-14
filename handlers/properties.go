@@ -2,12 +2,12 @@ package handlers
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/lomokwa/mc-manager/services"
 	"github.com/lomokwa/mc-manager/types"
 )
 
 func GetServerPropertiesHandler(c *gin.Context) {
-	props, err := services.GetServerProperties()
+	rt := runtimeFromRequest(c)
+	props, err := rt.GetServerProperties()
 	if err != nil {
 		c.JSON(500, types.APIResponse{Error: "failed to read server properties"})
 		return
@@ -17,6 +17,8 @@ func GetServerPropertiesHandler(c *gin.Context) {
 }
 
 func UpdateServerPropertiesHandler(c *gin.Context) {
+	rt := runtimeFromRequest(c)
+
 	var req types.UpdateServerPropertiesRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, types.APIResponse{Error: "invalid request body"})
@@ -28,7 +30,7 @@ func UpdateServerPropertiesHandler(c *gin.Context) {
 		return
 	}
 
-	err := services.UpdateServerProperties(req.Properties)
+	err := rt.UpdateServerProperties(req.Properties)
 	if err != nil {
 		c.JSON(500, types.APIResponse{Error: "failed to update server properties"})
 		return

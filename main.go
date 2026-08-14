@@ -93,6 +93,18 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
+	r := newRouter()
+	r.Run()
+}
+
+// newRouter builds the full route table -- CORS, the rate limiter, auth
+// middleware, and every route, flat and namespaced alike. Split out from
+// main() so main_routes_test.go can exercise the real router end-to-end
+// (proving the flat routes and their /api/servers/:sid equivalents actually
+// route, and behave the same way) without also pulling in main()'s
+// process-level side effects: godotenv, the pprof listener, the DB/registry
+// boot sequence's log.Fatalf calls, or r.Run()'s blocking listener.
+func newRouter() *gin.Engine {
 	// gin.Default() is gin.New() + Logger() + Recovery(); this is the same
 	// thing with the stock logger swapped for one that redacts credentials
 	// from the logged URL. Recovery is kept exactly as before.
@@ -172,6 +184,57 @@ func main() {
 	// Server Health check
 	api.GET("/status", handlers.StatusHandler)
 
+	// Server registry (PLAN-multi-server.md D3): list every server, or
+	// inspect one, each with its live status folded in -- see
+	// handlers/servers.go. No extra permission beyond the JWT ValidateJWT
+	// already requires, same gate as GET /api/status just above; see
+	// ListServersHandler's own doc comment for why. GetServerHandler needs
+	// the same :sid -> runtime resolution (and 404-on-unknown-id) as the
+	// namespaced action routes below, so it also runs ResolveServer.
+	api.GET("/servers", handlers.ListServersHandler)
+	api.GET("/servers/:sid", middleware.ResolveServer(), handlers.GetServerHandler)
+
+	// Namespaced per-server routes (PLAN-multi-server.md D3): the SAME
+	// handlers as their flat counterparts above, mounted under
+	// /api/servers/:sid with the SAME permission on each one -- only the URL
+	// and the runtime a request resolves to differ. ResolveServer 404s an
+	// unknown :sid before any handler below runs; a matched :sid stores its
+	// *services.ServerRuntime in the context, which each handler reads via
+	// runtimeFromRequest (handlers/runtime.go) instead of falling back to
+	// the default runtime the way reaching it through the flat route above
+	// does.
+	//
+	// The flat routes above are NOT removed, deprecated, or redirected --
+	// per PLAN-multi-server.md D3 they stay forever as aliases for the
+	// "default" server. The Discord bot (selton-mello-bot, a separately
+	// deployed service) calls /api/players today with no way to learn about
+	// /api/servers/:sid/... on its own schedule; breaking the flat routes
+	// breaks it in production. See main_routes_test.go's
+	// TestFlatRoutes_StillRouteAndMatchDefaultServer.
+	serverScoped := api.Group("/servers/:sid", middleware.ResolveServer())
+	serverScoped.GET("/status", handlers.StatusHandler)
+	serverScoped.POST("/start", perm(types.PermServerStart), handlers.StartServerHandler)
+	serverScoped.POST("/stop", perm(types.PermServerStop), handlers.StopServerHandler)
+	serverScoped.GET("/console", perm(types.PermConsoleRead), handlers.ConsoleHandler)
+	serverScoped.GET("/players", perm(types.PermPlayersView), handlers.ListPlayersHandler)
+	serverScoped.GET("/properties", perm(types.PermSettingsView), handlers.GetServerPropertiesHandler)
+	serverScoped.PATCH("/properties", perm(types.PermSettingsEdit), handlers.UpdateServerPropertiesHandler)
+
+	serverScoped.GET("/files", perm(types.PermFilesRead), handlers.ListFilesHandler)
+	serverScoped.GET("/files/read", perm(types.PermFilesRead), handlers.ReadFileHandler)
+	serverScoped.PUT("/files", perm(types.PermFilesEdit), handlers.WriteFileHandler)
+	serverScoped.GET("/files/download", perm(types.PermFilesRead), handlers.DownloadFileHandler)
+	serverScoped.POST("/files/upload", perm(types.PermFilesUpload), handlers.UploadFileHandler)
+	serverScoped.DELETE("/files", perm(types.PermFilesDelete), handlers.DeleteFileHandler)
+
+	serverScoped.GET("/backups", perm(types.PermBackupsView), handlers.ListBackupsHandler)
+	serverScoped.POST("/backups", perm(types.PermBackupsCreate), handlers.CreateBackupHandler)
+	serverScoped.DELETE("/backups", perm(types.PermBackupsDelete), handlers.DeleteBackupHandler)
+	serverScoped.GET("/backups/download", perm(types.PermBackupsDownload), handlers.DownloadBackupHandler)
+	serverScoped.POST("/backups/restore", perm(types.PermBackupsRestore), handlers.RestoreBackupHandler)
+	serverScoped.GET("/backups/config", perm(types.PermBackupsView), handlers.GetBackupConfigHandler)
+	serverScoped.PUT("/backups/config", perm(types.PermBackupsCreate), handlers.UpdateBackupConfigHandler)
+
 	// Serve API Docs
 	r.GET("/api/docs/*any", func(c *gin.Context) {
 		if c.Param("any") == "/" || c.Param("any") == "" {
@@ -181,7 +244,7 @@ func main() {
 		ginSwagger.WrapHandler(swaggerFiles.Handler, ginSwagger.DefaultModelsExpandDepth(-1), ginSwagger.URL("/api/docs/doc.json"))(c)
 	})
 
-	r.Run()
+	return r
 }
 
 // allowedOrigins returns the CORS allow-list. It reads a comma-separated

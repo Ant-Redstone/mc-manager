@@ -89,13 +89,14 @@ func CreateServerHandler(c *gin.Context) {
 // @Router /api/start [post]
 func StartServerHandler(c *gin.Context) {
 	log.Printf("start request received")
+	rt := runtimeFromRequest(c)
 
-	if !utils.FileExists(services.ServerJarPath) {
+	if !utils.FileExists(rt.ServerJarPath()) {
 		c.JSON(http.StatusBadRequest, types.APIResponse{Error: "server not created yet, use POST /api/server first"})
 		return
 	}
 
-	output, err := services.StartServerProcess()
+	output, err := rt.StartServerProcess()
 	if err != nil {
 		log.Printf("failed to start server process: %v", err)
 		c.JSON(http.StatusBadRequest, types.APIResponse{Error: err.Error()})
@@ -169,8 +170,9 @@ func ServerExistsHandler(c *gin.Context) {
 // @Router /api/stop [post]
 func StopServerHandler(c *gin.Context) {
 	log.Printf("stop request received")
+	rt := runtimeFromRequest(c)
 
-	output, err := services.StopServerProcess()
+	output, err := rt.StopServerProcess()
 	if err != nil {
 		log.Printf("failed to stop server process: %v", err)
 		c.JSON(http.StatusBadRequest, types.APIResponse{Error: err.Error()})
@@ -189,5 +191,6 @@ func StopServerHandler(c *gin.Context) {
 // @Router /api/status [get]
 func StatusHandler(c *gin.Context) {
 	log.Printf("status request received")
-	c.JSON(http.StatusOK, types.APIResponse{Success: true, Data: gin.H{"running": services.IsServerRunning()}})
+	rt := runtimeFromRequest(c)
+	c.JSON(http.StatusOK, types.APIResponse{Success: true, Data: gin.H{"running": rt.IsServerRunning()}})
 }

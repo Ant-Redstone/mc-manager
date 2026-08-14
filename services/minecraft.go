@@ -373,41 +373,11 @@ func (rt *ServerRuntime) ListPlayers() ([]types.Player, error) {
 	return players, nil
 }
 
-// --- Package-level wrappers over the default runtime ------------------------
-//
-// Both existed before Phase 1 introduced ServerRuntime and must keep
-// behaving identically for the single server that exists today (see
-// DefaultRuntime in runtime.go) -- in particular, ListPlayers is what
-// selton-mello-bot's flat /api/players call ultimately reaches, so this is
-// exactly the compatibility path PLAN-multi-server.md D3 requires.
-
-func GetOnlinePlayers() ([]string, error) {
-	return DefaultRuntime().GetOnlinePlayers()
-}
-
-func ListPlayers() ([]types.Player, error) {
-	return DefaultRuntime().ListPlayers()
-}
-
-func DeleteServer() error {
-	// Remove everything in the server directory except the directory itself
-	entries, err := os.ReadDir(ServerDir)
-	if err != nil {
-		return fmt.Errorf("failed to read server directory: %w", err)
-	}
-
-	for _, entry := range entries {
-		path := filepath.Join(ServerDir, entry.Name())
-		if err := os.RemoveAll(path); err != nil {
-			return fmt.Errorf("failed to remove %s: %w", path, err)
-		}
-	}
-
-	return nil
-}
-
-func GetServerProperties() (map[string]string, error) {
-	data, err := os.ReadFile(filepath.Join(ServerDir, "server.properties"))
+// GetServerProperties reads and parses this runtime's own server.properties
+// file (comments and blank lines skipped), rooted at rt.Dir rather than the
+// fixed ServerDir constant -- see PLAN-multi-server.md D4.
+func (rt *ServerRuntime) GetServerProperties() (map[string]string, error) {
+	data, err := os.ReadFile(filepath.Join(rt.Dir, "server.properties"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read server.properties: %w", err)
 	}
@@ -426,8 +396,10 @@ func GetServerProperties() (map[string]string, error) {
 	return props, nil
 }
 
-func UpdateServerProperties(properties map[string]string) error {
-	data, err := os.ReadFile(filepath.Join(ServerDir, "server.properties"))
+// UpdateServerProperties merges properties into this runtime's existing
+// server.properties, preserving any existing key not present in properties.
+func (rt *ServerRuntime) UpdateServerProperties(properties map[string]string) error {
+	data, err := os.ReadFile(filepath.Join(rt.Dir, "server.properties"))
 	if err != nil {
 		return fmt.Errorf("failed to read server.properties: %w", err)
 	}
@@ -453,5 +425,52 @@ func UpdateServerProperties(properties map[string]string) error {
 		fmt.Fprintf(&content, "%s=%s\n", k, v)
 	}
 
-	return utils.WriteFile(filepath.Join(ServerDir, "server.properties"), []byte(content.String()))
+	return utils.WriteFile(filepath.Join(rt.Dir, "server.properties"), []byte(content.String()))
+}
+
+// --- Package-level wrappers over the default runtime ------------------------
+//
+// All of these existed before Phase 1 introduced ServerRuntime and must keep
+// behaving identically for the single server that exists today (see
+// DefaultRuntime in runtime.go) -- in particular, ListPlayers is what
+// selton-mello-bot's flat /api/players call ultimately reaches, so this is
+// exactly the compatibility path PLAN-multi-server.md D3 requires.
+
+func GetOnlinePlayers() ([]string, error) {
+	return DefaultRuntime().GetOnlinePlayers()
+}
+
+func ListPlayers() ([]types.Player, error) {
+	return DefaultRuntime().ListPlayers()
+}
+
+func GetServerProperties() (map[string]string, error) {
+	return DefaultRuntime().GetServerProperties()
+}
+
+func UpdateServerProperties(properties map[string]string) error {
+	return DefaultRuntime().UpdateServerProperties(properties)
+}
+
+// DeleteServer removes everything in the (fixed, default-only) ServerDir
+// except the directory itself. Deliberately NOT a ServerRuntime method or
+// namespaced under /api/servers/:sid: it backs DELETE /api/server, which
+// PLAN-multi-server.md's Phase 3 scope explicitly leaves flat-only -- the
+// registry has no create/delete/update yet (that needs the Phase 2
+// supervisor to actually run more than one JVM first), so there is only
+// ever one server whose files this could mean.
+func DeleteServer() error {
+	entries, err := os.ReadDir(ServerDir)
+	if err != nil {
+		return fmt.Errorf("failed to read server directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		path := filepath.Join(ServerDir, entry.Name())
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("failed to remove %s: %w", path, err)
+		}
+	}
+
+	return nil
 }

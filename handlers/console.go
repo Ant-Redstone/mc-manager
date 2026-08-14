@@ -69,12 +69,14 @@ const (
 // ConsoleHandler upgrades the connection to a WebSocket and streams
 // Minecraft server logs to the client while accepting commands from it.
 func ConsoleHandler(c *gin.Context) {
-	if !services.IsServerRunning() {
+	rt := runtimeFromRequest(c)
+
+	if !rt.IsServerRunning() {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "server is not running"})
 		return
 	}
 
-	hub := services.GetLogHub()
+	hub := rt.Hub
 	if hub == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "server log stream not available"})
 		return
@@ -136,7 +138,7 @@ func ConsoleHandler(c *gin.Context) {
 				}
 				continue
 			}
-			if err := services.SendCommand(cmd); err != nil {
+			if err := rt.SendCommand(cmd); err != nil {
 				log.Printf("failed to send command %q: %v", cmd, err)
 				select {
 				case errCh <- err.Error():
@@ -189,7 +191,7 @@ func ConsoleHandler(c *gin.Context) {
 			}
 
 		case <-statusTicker.C:
-			if !services.IsServerRunning() {
+			if !rt.IsServerRunning() {
 				conn.SetWriteDeadline(time.Now().Add(consoleWriteTimeout))
 				conn.WriteMessage(websocket.CloseMessage,
 					websocket.FormatCloseMessage(websocket.CloseNormalClosure, "server stopped"))

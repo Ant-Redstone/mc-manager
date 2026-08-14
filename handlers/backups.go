@@ -19,7 +19,8 @@ import (
 // @Security BearerAuth
 // @Router /api/backups [get]
 func ListBackupsHandler(c *gin.Context) {
-	backups, err := services.ListBackups()
+	rt := runtimeFromRequest(c)
+	backups, err := rt.ListBackups()
 	if err != nil {
 		log.Printf("failed to list backups: %v", err)
 		c.JSON(http.StatusInternalServerError, types.APIResponse{Error: "failed to list backups"})
@@ -40,8 +41,9 @@ func ListBackupsHandler(c *gin.Context) {
 // @Router /api/backups [post]
 func CreateBackupHandler(c *gin.Context) {
 	log.Printf("create backup request received")
+	rt := runtimeFromRequest(c)
 
-	info, err := services.CreateBackup()
+	info, err := rt.CreateBackup()
 	if err != nil {
 		log.Printf("failed to create backup: %v", err)
 		c.JSON(http.StatusBadRequest, types.APIResponse{Error: err.Error()})
@@ -68,7 +70,8 @@ func DeleteBackupHandler(c *gin.Context) {
 		return
 	}
 
-	if err := services.DeleteBackup(name); err != nil {
+	rt := runtimeFromRequest(c)
+	if err := rt.DeleteBackup(name); err != nil {
 		log.Printf("failed to delete backup %q: %v", name, err)
 		c.JSON(http.StatusBadRequest, types.APIResponse{Error: err.Error()})
 		return
@@ -95,7 +98,8 @@ func DownloadBackupHandler(c *gin.Context) {
 		return
 	}
 
-	path, err := services.BackupFilePath(name)
+	rt := runtimeFromRequest(c)
+	path, err := rt.BackupFilePath(name)
 	if err != nil {
 		c.JSON(http.StatusNotFound, types.APIResponse{Error: err.Error()})
 		return
@@ -127,7 +131,8 @@ func RestoreBackupHandler(c *gin.Context) {
 
 	log.Printf("restore backup request received: %s", req.Name)
 
-	if err := services.RestoreBackup(req.Name); err != nil {
+	rt := runtimeFromRequest(c)
+	if err := rt.RestoreBackup(req.Name); err != nil {
 		log.Printf("failed to restore backup %q: %v", req.Name, err)
 		c.JSON(http.StatusBadRequest, types.APIResponse{Error: err.Error()})
 		return
@@ -145,6 +150,18 @@ func RestoreBackupHandler(c *gin.Context) {
 // @Failure 500 {object} types.APIResponse
 // @Security BearerAuth
 // @Router /api/backups/config [get]
+//
+// GetBackupConfigHandler (and UpdateBackupConfigHandler below) deliberately
+// do NOT resolve a runtime and stay on the services.LoadBackupConfig/
+// SaveBackupConfig package functions: backup_config is still the single
+// CHECK(id = 1) row it always was (see services/backup.go's comment on
+// those two). They're still mounted under /api/servers/:sid/backups/config
+// via ResolveServer -- so an unknown :sid 404s the same as every other
+// namespaced route -- but a known :sid's config always reads/writes that
+// same single global schedule, same as the flat route. Giving it a
+// per-server schedule needs a server_id column, which is a real migration
+// this PR intentionally doesn't take on (see PLAN-multi-server.md D1) --
+// there's only ever one server able to reach this today anyway.
 func GetBackupConfigHandler(c *gin.Context) {
 	cfg, err := services.LoadBackupConfig()
 	if err != nil {

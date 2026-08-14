@@ -51,7 +51,7 @@ func safePath(rt *services.ServerRuntime, requested string) (string, error) {
 func ListFilesHandler(c *gin.Context) {
 	reqPath := c.Query("path")
 
-	resolved, err := safePath(services.DefaultRuntime(), reqPath)
+	resolved, err := safePath(runtimeFromRequest(c), reqPath)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: err.Error()})
 		return
@@ -94,7 +94,7 @@ func ListFilesHandler(c *gin.Context) {
 func ReadFileHandler(c *gin.Context) {
 	reqPath := c.Query("path")
 
-	resolved, err := safePath(services.DefaultRuntime(), reqPath)
+	resolved, err := safePath(runtimeFromRequest(c), reqPath)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: err.Error()})
 		return
@@ -129,7 +129,7 @@ func ReadFileHandler(c *gin.Context) {
 func WriteFileHandler(c *gin.Context) {
 	reqPath := c.Query("path")
 
-	resolved, err := safePath(services.DefaultRuntime(), reqPath)
+	resolved, err := safePath(runtimeFromRequest(c), reqPath)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: err.Error()})
 		return
@@ -165,7 +165,7 @@ func WriteFileHandler(c *gin.Context) {
 func DownloadFileHandler(c *gin.Context) {
 	reqPath := c.Query("path")
 
-	resolved, err := safePath(services.DefaultRuntime(), reqPath)
+	resolved, err := safePath(runtimeFromRequest(c), reqPath)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: err.Error()})
 		return
@@ -187,7 +187,7 @@ func DownloadFileHandler(c *gin.Context) {
 // UploadFileHandler handles multipart file uploads to a directory.
 func UploadFileHandler(c *gin.Context) {
 	reqPath := c.Query("path")
-	rt := services.DefaultRuntime()
+	rt := runtimeFromRequest(c)
 
 	resolved, err := safePath(rt, reqPath)
 	if err != nil {
@@ -238,7 +238,7 @@ func UploadFileHandler(c *gin.Context) {
 // server root itself is never removable.
 func DeleteFileHandler(c *gin.Context) {
 	reqPath := c.Query("path")
-	rt := services.DefaultRuntime()
+	rt := runtimeFromRequest(c)
 
 	resolved, err := safePath(rt, reqPath)
 	if err != nil {
