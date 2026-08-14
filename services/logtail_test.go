@@ -21,9 +21,9 @@ func TestFileExists(t *testing.T) {
 	}
 }
 
-// rotated() reads from the fixed LatestLogPath constant internally, so these
-// tests set up real files there (via setupServerDir/writeServerFile) rather
-// than passing in an arbitrary path.
+// rotated() takes an explicit path parameter (see logtail.go), so these
+// tests pass the fixed LatestLogPath constant -- the same one setupServerDir
+// /writeServerFile populate -- rather than relying on it implicitly.
 
 func TestRotated_SameFileNotTruncated(t *testing.T) {
 	setupServerDir(t)
@@ -39,7 +39,7 @@ func TestRotated_SameFileNotTruncated(t *testing.T) {
 		t.Fatalf("failed to stat file: %v", err)
 	}
 
-	if rotated(f, info) {
+	if rotated(f, info, LatestLogPath) {
 		t.Error("expected rotated to be false for an untouched file")
 	}
 }
@@ -65,7 +65,7 @@ func TestRotated_DifferentFileDetected(t *testing.T) {
 	}
 	writeServerFile(t, "logs/latest.log", "a fresh session\n")
 
-	if !rotated(f, info) {
+	if !rotated(f, info, LatestLogPath) {
 		t.Error("expected rotated to be true when a new file now occupies the path")
 	}
 }
@@ -90,7 +90,7 @@ func TestRotated_TruncatedInPlace(t *testing.T) {
 		t.Fatalf("failed to truncate file: %v", err)
 	}
 
-	if !rotated(f, info) {
+	if !rotated(f, info, LatestLogPath) {
 		t.Error("expected rotated to be true after in-place truncation")
 	}
 }
@@ -115,7 +115,7 @@ func TestRotated_MissingPathIsNotRotated(t *testing.T) {
 
 	// A briefly-missing path mid-rotation should be tolerated, not reported
 	// as rotated, so the tailer waits rather than thrashing.
-	if rotated(f, info) {
+	if rotated(f, info, LatestLogPath) {
 		t.Error("expected rotated to be false when the path is briefly missing")
 	}
 }

@@ -63,11 +63,24 @@ func main() {
 	// deny-by-default the moment this deploys -- see EnsureBootstrapOwner.
 	services.EnsureBootstrapOwner()
 
-	// Start following the Minecraft server's own log file. This must happen
-	// before any handler can be reached, since GetLogHub() is expected to be
-	// non-nil from here on — the JVM itself now runs in a separate container
-	// (see cmd/supervisor), so this is how the API learns what it's doing.
-	services.StartLogTailer()
+	// Seed the server registry (idempotent no-op after the first boot -- see
+	// EnsureDefaultServer) and build the per-server runtime map from it. This
+	// is PLAN-multi-server.md Phase 1: a registry that today describes
+	// exactly the one server that already existed, at exactly the directory
+	// it already lived in -- nothing on disk moves.
+	//
+	// LoadRuntimes also starts each runtime's log tailer, including the
+	// default's, which is what StartLogTailer() used to do directly here.
+	// That must happen before any handler can be reached, since GetLogHub()
+	// (which now reads DefaultRuntime().Hub) is expected to be non-nil from
+	// here on — the JVM itself runs in a separate container (see
+	// cmd/supervisor), so this is how the API learns what it's doing.
+	if err := services.EnsureDefaultServer(); err != nil {
+		log.Fatalf("failed to seed default server: %v", err)
+	}
+	if err := services.LoadRuntimes(); err != nil {
+		log.Fatalf("failed to load server runtimes: %v", err)
+	}
 
 	// Start the automatic backup scheduler
 	services.StartBackupScheduler()

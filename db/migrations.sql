@@ -61,3 +61,20 @@ CREATE TABLE IF NOT EXISTS mc_link_codes (
   code VARCHAR(6) NOT NULL,
   expires_at TIMESTAMP NOT NULL
 );
+
+-- Multi-server registry (Phase 1 of PLAN-multi-server.md). Seeded with
+-- exactly one row by services.EnsureDefaultServer, pointing at whatever
+-- directory the single server already lived in -- this table describes
+-- servers, it never causes one to be moved, copied, or renamed.
+CREATE TABLE IF NOT EXISTS servers (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  dir        TEXT NOT NULL UNIQUE,
+  port       INTEGER NOT NULL,
+  voice_port INTEGER,
+  jar        TEXT NOT NULL DEFAULT 'server.jar',
+  xms        TEXT NOT NULL DEFAULT '1G',
+  xmx        TEXT NOT NULL DEFAULT '2G',
+  sort       INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

@@ -21,10 +21,14 @@ type fileEntry struct {
 	ModTime time.Time `json:"mod_time"`
 }
 
-// safePath resolves the requested path within the minecraft-server directory
-// and prevents path traversal attacks.
-func safePath(requested string) (string, error) {
-	base, err := filepath.Abs(services.ServerDir)
+// safePath resolves the requested path within rt's server directory and
+// prevents path traversal attacks. rt.Dir comes from the registry (never
+// from the request), so even a fully-attacker-controlled `requested` value
+// can only ever resolve inside the one directory rt already points at —
+// see handlers/files_test.go for the traversal tests proving this, both for
+// the default runtime and for an arbitrary one.
+func safePath(rt *services.ServerRuntime, requested string) (string, error) {
+	base, err := filepath.Abs(rt.Dir)
 	if err != nil {
 		return "", err
 	}
@@ -47,7 +51,7 @@ func safePath(requested string) (string, error) {
 func ListFilesHandler(c *gin.Context) {
 	reqPath := c.Query("path")
 
-	resolved, err := safePath(reqPath)
+	resolved, err := safePath(services.DefaultRuntime(), reqPath)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: err.Error()})
 		return
@@ -90,7 +94,7 @@ func ListFilesHandler(c *gin.Context) {
 func ReadFileHandler(c *gin.Context) {
 	reqPath := c.Query("path")
 
-	resolved, err := safePath(reqPath)
+	resolved, err := safePath(services.DefaultRuntime(), reqPath)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: err.Error()})
 		return
@@ -125,7 +129,7 @@ func ReadFileHandler(c *gin.Context) {
 func WriteFileHandler(c *gin.Context) {
 	reqPath := c.Query("path")
 
-	resolved, err := safePath(reqPath)
+	resolved, err := safePath(services.DefaultRuntime(), reqPath)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: err.Error()})
 		return
@@ -161,7 +165,7 @@ func WriteFileHandler(c *gin.Context) {
 func DownloadFileHandler(c *gin.Context) {
 	reqPath := c.Query("path")
 
-	resolved, err := safePath(reqPath)
+	resolved, err := safePath(services.DefaultRuntime(), reqPath)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: err.Error()})
 		return
@@ -183,8 +187,9 @@ func DownloadFileHandler(c *gin.Context) {
 // UploadFileHandler handles multipart file uploads to a directory.
 func UploadFileHandler(c *gin.Context) {
 	reqPath := c.Query("path")
+	rt := services.DefaultRuntime()
 
-	resolved, err := safePath(reqPath)
+	resolved, err := safePath(rt, reqPath)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: err.Error()})
 		return
@@ -208,7 +213,7 @@ func UploadFileHandler(c *gin.Context) {
 	dest := filepath.Join(resolved, filename)
 
 	// Ensure destination is still within the server dir
-	if destCheck, err := safePath(filepath.Join(reqPath, filename)); err != nil || destCheck != dest {
+	if destCheck, err := safePath(rt, filepath.Join(reqPath, filename)); err != nil || destCheck != dest {
 		c.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: "invalid filename"})
 		return
 	}
@@ -233,14 +238,15 @@ func UploadFileHandler(c *gin.Context) {
 // server root itself is never removable.
 func DeleteFileHandler(c *gin.Context) {
 	reqPath := c.Query("path")
+	rt := services.DefaultRuntime()
 
-	resolved, err := safePath(reqPath)
+	resolved, err := safePath(rt, reqPath)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: err.Error()})
 		return
 	}
 
-	base, err := filepath.Abs(services.ServerDir)
+	base, err := filepath.Abs(rt.Dir)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, types.APIResponse{Success: false, Error: "failed to resolve server directory"})
 		return

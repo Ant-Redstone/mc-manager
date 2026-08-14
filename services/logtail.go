@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/lomokwa/mc-manager/types"
@@ -24,38 +23,42 @@ const (
 	backlogWindowBytes = 256 * 1024
 )
 
-var (
-	tailHub  *types.LogHub
-	tailOnce sync.Once
-)
-
-// StartLogTailer creates the process-wide log hub and begins following
-// LatestLogPath. Call once at API startup. Unlike the old in-process
-// exec.Cmd's stdout pump, this hub is never closed on server stop — the
-// minecraft container (and its log file) can outlive any single API process,
-// so the hub's lifetime now matches the API's, not the JVM's.
-func StartLogTailer() {
-	tailOnce.Do(func() {
-		tailHub = types.NewLogHub()
-		go tailLoop()
+// startRuntimeTailer creates rt's log hub and begins following rt's
+// LatestLogPath, exactly once per runtime (rt.tailOnce). Unlike the old
+// in-process exec.Cmd's stdout pump, this hub is never closed on server
+// stop -- the minecraft container (and its log file) can outlive any single
+// API process, so the hub's lifetime now matches the API's, not the JVM's.
+func startRuntimeTailer(rt *ServerRuntime) {
+	rt.tailOnce.Do(func() {
+		rt.Hub = types.NewLogHub()
+		go tailLoopFor(rt)
 	})
 }
 
-// GetLogHub returns the long-lived hub fed by the tailer. Non-nil once
-// StartLogTailer has been called (which main.go does at boot), so callers no
-// longer need to guard against a nil hub between server starts.
-func GetLogHub() *types.LogHub {
-	return tailHub
+// StartLogTailer starts the default server's log tailer. Kept for every
+// pre-Phase-1 caller (and its own tests): LoadRuntimes now does this for
+// every registry row including the default, so this is just
+// startRuntimeTailer(DefaultRuntime()) under a stable, older name.
+func StartLogTailer() {
+	startRuntimeTailer(DefaultRuntime())
 }
 
-// tailLoop follows LatestLogPath, broadcasting each complete line to tailHub.
-// Minecraft rotates this file on every JVM start (a fresh file replaces the
-// old one) — this has bitten the project before, so rotation is detected two
-// ways rather than trusting file position alone: the file's identity
-// (os.SameFile) or its size shrinking under our read offset (truncation).
-// Either signals "reopen from the top", since the new session's own readiness
-// line ("Done (...)") must not be missed.
-func tailLoop() {
+// GetLogHub returns the default server's long-lived hub. Non-nil once
+// StartLogTailer/LoadRuntimes has run (which main.go does at boot), so
+// pre-Phase-1 callers no longer need to guard against a nil hub between
+// server starts -- same contract as before Phase 1.
+func GetLogHub() *types.LogHub {
+	return DefaultRuntime().Hub
+}
+
+// tailLoopFor follows rt's LatestLogPath, broadcasting each complete line to
+// rt.Hub. Minecraft rotates this file on every JVM start (a fresh file
+// replaces the old one) -- this has bitten the project before, so rotation
+// is detected two ways rather than trusting file position alone: the
+// file's identity (os.SameFile) or its size shrinking under our read offset
+// (truncation). Either signals "reopen from the top", since the new
+// session's own readiness line ("Done (...)") must not be missed.
+func tailLoopFor(rt *ServerRuntime) {
 	var (
 		f       *os.File
 		reader  *bufio.Reader
@@ -63,16 +66,18 @@ func tailLoop() {
 		partial []byte
 	)
 
+	path := rt.LatestLogPath()
+
 	// If the file already exists right now, we're attaching to a server that
 	// may already be running — seed the hub's replay buffer with the tail of
 	// its existing output (so a console opened right after an API restart is
 	// never blank while the JVM sits mid-session), then continue tailing from
 	// there. A file that doesn't exist yet is a fresh session: read it from
 	// the start once it appears, so the "Done" line isn't missed.
-	seedBacklogOnOpen := fileExists(LatestLogPath)
+	seedBacklogOnOpen := fileExists(path)
 
 	openCurrent := func() bool {
-		nf, err := os.Open(LatestLogPath)
+		nf, err := os.Open(path)
 		if err != nil {
 			return false
 		}
@@ -83,7 +88,7 @@ func tailLoop() {
 		}
 		if seedBacklogOnOpen {
 			for _, line := range readBacklog(nf) {
-				tailHub.Broadcast(line)
+				rt.Hub.Broadcast(line)
 			}
 			seedBacklogOnOpen = false
 		}
@@ -104,7 +109,7 @@ func tailLoop() {
 			if len(chunk) > 0 {
 				partial = append(partial, chunk...)
 				if partial[len(partial)-1] == '\n' {
-					tailHub.Broadcast(strings.TrimRight(string(partial), "\r\n"))
+					rt.Hub.Broadcast(strings.TrimRight(string(partial), "\r\n"))
 					partial = nil
 				}
 			}
@@ -113,7 +118,7 @@ func tailLoop() {
 			}
 		}
 
-		if rotated(f, info) {
+		if rotated(f, info, path) {
 			f.Close()
 			f = nil // reopened on the next loop iteration, from offset 0
 			continue
@@ -179,8 +184,12 @@ func readBacklog(f *os.File) []string {
 	return lines
 }
 
-func rotated(f *os.File, openedInfo os.FileInfo) bool {
-	pathInfo, err := os.Stat(LatestLogPath)
+// rotated reports whether path no longer refers to the file f was opened
+// from. path is passed explicitly (rather than read from a fixed constant)
+// so the same check works for every runtime's own LatestLogPath, not just
+// the default server's.
+func rotated(f *os.File, openedInfo os.FileInfo, path string) bool {
+	pathInfo, err := os.Stat(path)
 	if err != nil {
 		return false // briefly missing mid-rotation — wait rather than thrash
 	}
