@@ -3,10 +3,12 @@ package main
 //go:generate go run github.com/swaggo/swag/cmd/swag@latest init
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/gin-contrib/cors"
@@ -66,7 +68,11 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	r := gin.Default()
+	// gin.Default() is gin.New() + Logger() + Recovery(); this is the same
+	// thing with the stock logger swapped for one that redacts credentials
+	// from the logged URL. Recovery is kept exactly as before.
+	r := gin.New()
+	r.Use(requestLogger(), gin.Recovery())
 
 	// Cors config
 	r.Use(cors.New(cors.Config{
@@ -153,4 +159,23 @@ func allowedOrigins() []string {
 		}
 	}
 	return origins
+}
+
+// credentialParamRe matches the `key` and `token` query parameters so their
+// values can be stripped from access logs. Both genuinely travel in the URL:
+// the API key may be passed as ?key= , and the console WebSocket has to send
+// its JWT as ?token= because browsers can't set headers on a WS handshake.
+// Without this they are written verbatim into every log line and survive in
+// whatever aggregates those logs.
+var credentialParamRe = regexp.MustCompile(`([?&](?:key|token)=)[^&]*`)
+
+// requestLogger is gin's access logger with credentials redacted from the
+// logged URL. gin puts the raw query string in LogFormatterParams.Path, which
+// is exactly where those values would otherwise appear.
+func requestLogger() gin.HandlerFunc {
+	return gin.LoggerWithFormatter(func(p gin.LogFormatterParams) string {
+		path := credentialParamRe.ReplaceAllString(p.Path, "${1}REDACTED")
+		return fmt.Sprintf("[GIN] %3d | %13v | %15s | %-7s %s\n",
+			p.StatusCode, p.Latency, p.ClientIP, p.Method, path)
+	})
 }

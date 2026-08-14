@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"os"
 	"strings"
@@ -9,6 +10,16 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/lomokwa/mc-manager/types"
 )
+
+// apiKeyValid compares the presented key against API_KEY in constant time.
+// A plain `==`/`!=` on secrets returns as soon as two bytes differ, so the
+// time it takes to reject leaks how long a prefix was correct -- enough to
+// recover the key byte by byte over many requests. An empty API_KEY never
+// matches, so a misconfigured server fails closed instead of accepting "".
+func apiKeyValid(presented string) bool {
+	expected := os.Getenv("API_KEY")
+	return expected != "" && subtle.ConstantTimeCompare([]byte(presented), []byte(expected)) == 1
+}
 
 func ValidateAPIKey() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -22,7 +33,7 @@ func ValidateAPIKey() gin.HandlerFunc {
 			return
 		}
 
-		if apiKey != os.Getenv("API_KEY") {
+		if !apiKeyValid(apiKey) {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, types.APIResponse{Error: "invalid API key"})
 			return
 		}
@@ -80,7 +91,7 @@ func ValidateAPIKeyOrJWT() gin.HandlerFunc {
 		if apiKey == "" {
 			apiKey = c.Query("key")
 		}
-		if apiKey != "" && apiKey == os.Getenv("API_KEY") {
+		if apiKey != "" && apiKeyValid(apiKey) {
 			c.Next()
 			return
 		}

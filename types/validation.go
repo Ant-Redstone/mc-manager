@@ -1,6 +1,9 @@
 package types
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 var boolValues = map[string]bool{"true": true, "false": true}
 
@@ -39,6 +42,20 @@ var propertyRules = map[string]func(string) error{
 
 func ValidateServerProperties(properties map[string]string) error {
 	for key, value := range properties {
+		// server.properties is a line-oriented `key=value` file, so a newline
+		// anywhere in a key or value doesn't just corrupt that entry -- it
+		// injects whole new settings the caller never named. A value of
+		// "10\nenable-rcon=true\nrcon.password=hunter2" would quietly open a
+		// remote console. '=' inside a key breaks the round-trip the same way.
+		// Only the rules below know each property's shape; this guard is what
+		// keeps an unrecognised key (which those rules skip entirely) from
+		// being a free write primitive into the file.
+		if key == "" {
+			return fmt.Errorf("property keys must not be empty")
+		}
+		if strings.ContainsAny(key, "=\r\n") || strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("invalid property %q: keys must not contain '=' and keys/values must not contain newlines", key)
+		}
 		if rule, exists := propertyRules[key]; exists {
 			if err := rule(value); err != nil {
 				return fmt.Errorf("invalid value for %q: %w", key, err)

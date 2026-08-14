@@ -3,6 +3,9 @@ package handlers
 import (
 	"log"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -12,9 +15,45 @@ import (
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		// TODO: restrict to allowed origins in production
-		return true
+		origin := r.Header.Get("Origin")
+		// Non-browser clients (the Discord bot, curl, scripts) send no Origin
+		// at all and stay allowed -- they still have to pass JWT/API-key auth.
+		// Browsers always send it, so this is what stops a random page the
+		// admin happens to visit from opening an authenticated console socket
+		// with their cookies/token and running commands (CSWSH).
+		return origin == "" || sameOrigin(origin, r.Host) || originAllowed(origin)
 	},
+}
+
+// sameOrigin reports whether the browser's Origin is this very host. A page
+// served from the same origin it is calling is not cross-site by definition,
+// so CSWSH cannot apply and there is nothing to block. Checking this first
+// matters operationally: a deployment that serves the panel and the API from
+// one host keeps working even if CORS_ALLOWED_ORIGINS was never set, instead
+// of the console silently dying the moment this check ships.
+func sameOrigin(origin, host string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || host == "" {
+		return false
+	}
+	return u.Host == host
+}
+
+// originAllowed reports whether a browser Origin may open the console
+// WebSocket. It reuses the REST API's CORS_ALLOWED_ORIGINS list (and its
+// same localhost fallback) so there is one allow-list to keep correct
+// rather than two that can drift apart.
+func originAllowed(origin string) bool {
+	raw := os.Getenv("CORS_ALLOWED_ORIGINS")
+	if strings.TrimSpace(raw) == "" {
+		return origin == "http://localhost:5173" || origin == "http://localhost:8080"
+	}
+	for _, p := range strings.Split(raw, ",") {
+		if strings.TrimSpace(p) == origin {
+			return true
+		}
+	}
+	return false
 }
 
 const (
