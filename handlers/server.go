@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -22,7 +22,7 @@ import (
 // @Security BearerAuth
 // @Router /api/server [post]
 func CreateServerHandler(c *gin.Context) {
-	log.Printf("create server request received")
+	slog.Debug("create server request received")
 
 	var req types.CreateServerRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -43,13 +43,13 @@ func CreateServerHandler(c *gin.Context) {
 	switch req.ServerType {
 	case "vanilla":
 		if err := services.DownloadServerJar(services.ServerJarPath, req.ReleaseVersion); err != nil {
-			log.Printf("failed to download server.jar: %v", err)
+			slog.Error("failed to download server.jar", "err", err)
 			c.JSON(http.StatusInternalServerError, types.APIResponse{Error: err.Error()})
 			return
 		}
 	case "fabric":
 		if err := services.DownloadFabricJar(services.ServerJarPath, req.ReleaseVersion, req.LoaderVersion); err != nil {
-			log.Printf("failed to download server.jar: %v", err)
+			slog.Error("failed to download server.jar", "err", err)
 			c.JSON(http.StatusInternalServerError, types.APIResponse{Error: err.Error()})
 			return
 		}
@@ -58,11 +58,11 @@ func CreateServerHandler(c *gin.Context) {
 		return
 	}
 
-	log.Printf("server.jar downloaded successfully")
+	slog.Info("server.jar downloaded")
 
-	log.Printf("creating server files")
+	slog.Info("creating server files")
 	if err := services.PrepareServerFiles(services.ServerDir, req.CreateLaunchScript, req.ConfigureProperties, req.Properties); err != nil {
-		log.Printf("failed to prepare server files: %v", err)
+		slog.Error("failed to prepare server files", "err", err)
 		c.JSON(http.StatusInternalServerError, types.APIResponse{Error: err.Error()})
 		return
 	}
@@ -73,7 +73,7 @@ func CreateServerHandler(c *gin.Context) {
 		LoaderVersion: req.LoaderVersion,
 	}
 	if err := services.SaveServerMeta(meta); err != nil {
-		log.Printf("failed to save server meta: %v", err)
+		slog.Error("failed to save server meta", "err", err)
 	}
 
 	c.JSON(http.StatusCreated, types.APIResponse{Success: true})
@@ -88,7 +88,7 @@ func CreateServerHandler(c *gin.Context) {
 // @Security BearerAuth
 // @Router /api/start [post]
 func StartServerHandler(c *gin.Context) {
-	log.Printf("start request received")
+	slog.Debug("start request received")
 	rt := runtimeFromRequest(c)
 
 	if !utils.FileExists(rt.ServerJarPath()) {
@@ -98,12 +98,12 @@ func StartServerHandler(c *gin.Context) {
 
 	output, err := rt.StartServerProcess()
 	if err != nil {
-		log.Printf("failed to start server process: %v", err)
+		slog.Error("failed to start server process", "err", err)
 		c.JSON(http.StatusBadRequest, types.APIResponse{Error: err.Error()})
 		return
 	}
 
-	log.Printf("server process started")
+	slog.Info("server process started")
 	c.JSON(http.StatusOK, types.APIResponse{Success: true, Data: output})
 }
 
@@ -117,7 +117,7 @@ func StartServerHandler(c *gin.Context) {
 // @Security BearerAuth
 // @Router /api/server [delete]
 func DeleteServerHandler(c *gin.Context) {
-	log.Printf("delete server request received")
+	slog.Debug("delete server request received")
 
 	if services.IsServerRunning() {
 		c.JSON(http.StatusBadRequest, types.APIResponse{Error: "cannot delete server while it is running"})
@@ -130,12 +130,12 @@ func DeleteServerHandler(c *gin.Context) {
 	}
 
 	if err := services.DeleteServer(); err != nil {
-		log.Printf("failed to delete server: %v", err)
+		slog.Error("failed to delete server", "err", err)
 		c.JSON(http.StatusInternalServerError, types.APIResponse{Error: err.Error()})
 		return
 	}
 
-	log.Printf("server deleted successfully")
+	slog.Info("server deleted")
 	c.JSON(http.StatusOK, types.APIResponse{Success: true})
 }
 
@@ -169,17 +169,17 @@ func ServerExistsHandler(c *gin.Context) {
 // @Failure 400 {object} map[string]interface{}
 // @Router /api/stop [post]
 func StopServerHandler(c *gin.Context) {
-	log.Printf("stop request received")
+	slog.Debug("stop request received")
 	rt := runtimeFromRequest(c)
 
 	output, err := rt.StopServerProcess()
 	if err != nil {
-		log.Printf("failed to stop server process: %v", err)
+		slog.Error("failed to stop server process", "err", err)
 		c.JSON(http.StatusBadRequest, types.APIResponse{Error: err.Error()})
 		return
 	}
 
-	log.Printf("server process stopped")
+	slog.Info("server process stopped")
 	c.JSON(http.StatusOK, types.APIResponse{Success: true, Data: output})
 }
 
@@ -190,7 +190,7 @@ func StopServerHandler(c *gin.Context) {
 // @Success 200 {object} map[string]interface{}
 // @Router /api/status [get]
 func StatusHandler(c *gin.Context) {
-	log.Printf("status request received")
+	slog.Debug("status request received")
 	rt := runtimeFromRequest(c)
 	c.JSON(http.StatusOK, types.APIResponse{Success: true, Data: gin.H{"running": rt.IsServerRunning()}})
 }

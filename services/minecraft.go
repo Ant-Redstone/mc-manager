@@ -3,7 +3,7 @@ package services
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -42,7 +42,7 @@ func LoadServerMeta() (*ServerMeta, error) {
 }
 
 func DownloadServerJar(destPath string, releaseVersion string) error {
-	log.Printf("downloading version manifest")
+	slog.Info("downloading version manifest")
 	res, err := http.Get("https://launchermeta.mojang.com/mc/game/version_manifest.json")
 	if err != nil {
 		return fmt.Errorf("failed to fetch version manifest")
@@ -85,7 +85,7 @@ func DownloadServerJar(destPath string, releaseVersion string) error {
 		return fmt.Errorf("latest version URL not found")
 	}
 
-	log.Printf("downloading latest version details")
+	slog.Info("downloading latest version details")
 	versionRes, err := http.Get(versionUrl)
 	if err != nil {
 		return fmt.Errorf("failed to fetch latest version details")
@@ -106,13 +106,13 @@ func DownloadServerJar(destPath string, releaseVersion string) error {
 
 	serverJarUrl := versionDetails.Downloads.Server.URL
 
-	log.Printf("downloading server jar to %s", destPath)
+	slog.Info("downloading server jar", "dest", destPath)
 	err = utils.DownloadFile(serverJarUrl, destPath)
 	if err != nil {
 		return fmt.Errorf("failed to download server.jar: %s", err)
 	}
 
-	log.Printf("server jar download complete")
+	slog.Info("server jar download complete")
 
 	return nil
 }
@@ -144,17 +144,17 @@ func DownloadFabricJar(destPath string, gameVersion string, loaderVersion string
 		gameVersion, loaderVersion, installerVersion,
 	)
 
-	log.Printf("downloading fabric server jar to %s", destPath)
+	slog.Info("downloading fabric server jar", "dest", destPath)
 	if err := utils.DownloadFile(jarURL, destPath); err != nil {
 		return fmt.Errorf("failed to download fabric server jar: %w", err)
 	}
 
-	log.Printf("fabric server jar download complete")
+	slog.Info("fabric server jar download complete")
 	return nil
 }
 
 func PrepareServerFiles(serverDir string, createLaunchScript bool, configureProperties bool, requestProperties map[string]string) error {
-	log.Printf("preparing server files in %s", serverDir)
+	slog.Info("preparing server files", "dir", serverDir)
 	if err := utils.WriteFile(filepath.Join(serverDir, "eula.txt"), []byte("eula=true")); err != nil {
 		return err
 	}
@@ -176,14 +176,14 @@ func PrepareServerFiles(serverDir string, createLaunchScript bool, configureProp
 
 	propertiesContent := []byte(content.String())
 	if configureProperties {
-		log.Printf("writing server.properties")
+		slog.Debug("writing server.properties")
 		if err := utils.WriteFile(filepath.Join(serverDir, "server.properties"), propertiesContent); err != nil {
 			return err
 		}
 	}
 
 	if createLaunchScript {
-		log.Printf("writing launch scripts")
+		slog.Debug("writing launch scripts")
 		shellScriptPath := filepath.Join(serverDir, "start-server.sh")
 		batScriptPath := filepath.Join(serverDir, "start-server.bat")
 
@@ -200,7 +200,7 @@ func PrepareServerFiles(serverDir string, createLaunchScript bool, configureProp
 		}
 	}
 
-	log.Printf("server file preparation complete")
+	slog.Info("server file preparation complete")
 
 	return nil
 }
@@ -348,7 +348,7 @@ func (rt *ServerRuntime) ListPlayers() ([]types.Player, error) {
 	if rt.IsServerRunning() {
 		names, err := rt.GetOnlinePlayers()
 		if err != nil {
-			log.Printf("could not find online players")
+			slog.Warn("could not read the online player list", "err", err)
 			for _, n := range names {
 				onlineSet[n] = false
 			}

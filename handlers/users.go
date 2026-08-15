@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -11,11 +11,11 @@ import (
 )
 
 func CreateInvitationHandler(c *gin.Context) {
-	log.Printf("create invitation request received")
+	slog.Debug("create invitation request received")
 
 	invitation, err := services.CreateInvitation()
 	if err != nil {
-		log.Printf("failed to create invitation: %v", err)
+		slog.Error("failed to create invitation", "err", err)
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}

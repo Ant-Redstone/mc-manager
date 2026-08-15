@@ -2,7 +2,7 @@ package services
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -50,7 +50,7 @@ func ApplyPermissionsSeed() {
 
 	var seed seedFile
 	if err := json.Unmarshal(data, &seed); err != nil {
-		log.Printf("permissions seed: invalid JSON in %s: %v", path, err)
+		slog.Error("permissions seed: invalid JSON", "path", path, "err", err)
 		return
 	}
 
@@ -83,7 +83,7 @@ func readFirstSeedFile() (path string, data []byte) {
 func EnsureBootstrapOwner() {
 	var count int
 	if err := db.DB.QueryRow(`SELECT COUNT(*) FROM user_roles`).Scan(&count); err != nil {
-		log.Printf("bootstrap owner: failed to check existing roles: %v", err)
+		slog.Error("bootstrap owner: failed to check existing roles", "err", err)
 		return
 	}
 	if count > 0 {
@@ -95,16 +95,16 @@ func EnsureBootstrapOwner() {
 		return // no one has registered yet -- nothing to bootstrap
 	}
 	if err := SetUserRole(firstUserID, "Owner"); err != nil {
-		log.Printf("bootstrap owner: failed to assign role: %v", err)
+		slog.Error("bootstrap owner: failed to assign role", "err", err)
 		return
 	}
-	log.Printf("bootstrap: no roles existed yet, granted Owner to the first registered account (user id %d)", firstUserID)
+	slog.Warn("bootstrap: no roles existed yet, granted Owner to the first registered account", "user_id", firstUserID)
 }
 
 func applySeedEntry(entry seedEntry) {
 	var userID int
 	if err := db.DB.QueryRow(`SELECT id FROM users WHERE username = ?`, entry.Username).Scan(&userID); err != nil {
-		log.Printf("permissions seed: %q isn't registered yet, will retry next boot", entry.Username)
+		slog.Warn("permissions seed: user not registered yet, will retry next boot", "user", entry.Username)
 		return
 	}
 
@@ -115,12 +115,12 @@ func applySeedEntry(entry seedEntry) {
 	}
 
 	if _, _, _, err := GetRoleByName(entry.Role); err != nil {
-		log.Printf("permissions seed: %q lists unknown role %q", entry.Username, entry.Role)
+		slog.Error("permissions seed: unknown role", "user", entry.Username, "role", entry.Role)
 		return
 	}
 	if err := SetUserRole(userID, entry.Role); err != nil {
-		log.Printf("permissions seed: failed to assign %q to %q: %v", entry.Role, entry.Username, err)
+		slog.Error("permissions seed: failed to assign role", "role", entry.Role, "user", entry.Username, "err", err)
 		return
 	}
-	log.Printf("permissions seed: assigned %q the %q role", entry.Username, entry.Role)
+	slog.Info("permissions seed: role assigned", "user", entry.Username, "role", entry.Role)
 }

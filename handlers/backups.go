@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 
@@ -22,7 +22,7 @@ func ListBackupsHandler(c *gin.Context) {
 	rt := runtimeFromRequest(c)
 	backups, err := rt.ListBackups()
 	if err != nil {
-		log.Printf("failed to list backups: %v", err)
+		slog.Error("failed to list backups", "err", err)
 		c.JSON(http.StatusInternalServerError, types.APIResponse{Error: "failed to list backups"})
 		return
 	}
@@ -40,17 +40,17 @@ func ListBackupsHandler(c *gin.Context) {
 // @Security BearerAuth
 // @Router /api/backups [post]
 func CreateBackupHandler(c *gin.Context) {
-	log.Printf("create backup request received")
+	slog.Debug("create backup request received")
 	rt := runtimeFromRequest(c)
 
 	info, err := rt.CreateBackup()
 	if err != nil {
-		log.Printf("failed to create backup: %v", err)
+		slog.Error("failed to create backup", "err", err)
 		c.JSON(http.StatusBadRequest, types.APIResponse{Error: err.Error()})
 		return
 	}
 
-	log.Printf("backup created: %s", info.Name)
+	slog.Info("backup created", "backup", info.Name)
 	c.JSON(http.StatusCreated, types.APIResponse{Success: true, Data: info})
 }
 
@@ -72,12 +72,12 @@ func DeleteBackupHandler(c *gin.Context) {
 
 	rt := runtimeFromRequest(c)
 	if err := rt.DeleteBackup(name); err != nil {
-		log.Printf("failed to delete backup %q: %v", name, err)
+		slog.Error("failed to delete backup", "backup", name, "err", err)
 		c.JSON(http.StatusBadRequest, types.APIResponse{Error: err.Error()})
 		return
 	}
 
-	log.Printf("backup deleted: %s", name)
+	slog.Info("backup deleted", "backup", name)
 	c.JSON(http.StatusOK, types.APIResponse{Success: true})
 }
 
@@ -129,16 +129,16 @@ func RestoreBackupHandler(c *gin.Context) {
 		return
 	}
 
-	log.Printf("restore backup request received: %s", req.Name)
+	slog.Debug("restore backup request received", "backup", req.Name)
 
 	rt := runtimeFromRequest(c)
 	if err := rt.RestoreBackup(req.Name); err != nil {
-		log.Printf("failed to restore backup %q: %v", req.Name, err)
+		slog.Error("failed to restore backup", "backup", req.Name, "err", err)
 		c.JSON(http.StatusBadRequest, types.APIResponse{Error: err.Error()})
 		return
 	}
 
-	log.Printf("backup restored: %s", req.Name)
+	slog.Warn("backup restored -- the live world was replaced", "backup", req.Name)
 	c.JSON(http.StatusOK, types.APIResponse{Success: true})
 }
 
@@ -165,7 +165,7 @@ func RestoreBackupHandler(c *gin.Context) {
 func GetBackupConfigHandler(c *gin.Context) {
 	cfg, err := services.LoadBackupConfig()
 	if err != nil {
-		log.Printf("failed to load backup config: %v", err)
+		slog.Error("failed to load backup config", "err", err)
 		c.JSON(http.StatusInternalServerError, types.APIResponse{Error: "failed to load backup config"})
 		return
 	}
@@ -197,13 +197,13 @@ func UpdateBackupConfigHandler(c *gin.Context) {
 	}
 
 	if err := services.SaveBackupConfig(cfg); err != nil {
-		log.Printf("failed to save backup config: %v", err)
+		slog.Error("failed to save backup config", "err", err)
 		c.JSON(http.StatusInternalServerError, types.APIResponse{Error: "failed to save backup config"})
 		return
 	}
 
 	services.NotifyBackupConfigChanged()
 
-	log.Printf("backup config updated: enabled=%v interval=%dmin keep=%d", cfg.Enabled, cfg.IntervalMinutes, cfg.Keep)
+	slog.Info("backup config updated", "enabled", cfg.Enabled, "interval_min", cfg.IntervalMinutes, "keep", cfg.Keep)
 	c.JSON(http.StatusOK, types.APIResponse{Success: true, Data: cfg})
 }

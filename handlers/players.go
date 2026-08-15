@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -9,11 +9,11 @@ import (
 )
 
 func ListPlayersHandler(c *gin.Context) {
-	log.Printf("list players request received")
+	slog.Debug("list players request received")
 	rt := runtimeFromRequest(c)
 	players, err := rt.ListPlayers()
 	if err != nil {
-		log.Printf("failed to list players: %v", err)
+		slog.Error("failed to list players", "err", err)
 		c.JSON(http.StatusInternalServerError, types.APIResponse{Error: err.Error()})
 		return
 	}

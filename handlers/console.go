@@ -1,7 +1,7 @@
 package handlers
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -88,7 +88,7 @@ func ConsoleHandler(c *gin.Context) {
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		log.Printf("websocket upgrade failed: %v", err)
+		slog.Error("websocket upgrade failed", "err", err)
 		return
 	}
 	defer conn.Close()
@@ -123,7 +123,7 @@ func ConsoleHandler(c *gin.Context) {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-					log.Printf("websocket read error: %v", err)
+					slog.Warn("console websocket read error", "err", err)
 				}
 				return
 			}
@@ -139,7 +139,7 @@ func ConsoleHandler(c *gin.Context) {
 				continue
 			}
 			if err := rt.SendCommand(cmd); err != nil {
-				log.Printf("failed to send command %q: %v", cmd, err)
+				slog.Error("failed to send console command", "err", err)
 				select {
 				case errCh <- err.Error():
 				default:
@@ -172,21 +172,21 @@ func ConsoleHandler(c *gin.Context) {
 			}
 			conn.SetWriteDeadline(time.Now().Add(consoleWriteTimeout))
 			if err := conn.WriteMessage(websocket.TextMessage, []byte(line)); err != nil {
-				log.Printf("websocket write error: %v", err)
+				slog.Warn("console websocket write error", "err", err)
 				return
 			}
 
 		case errMsg := <-errCh:
 			conn.SetWriteDeadline(time.Now().Add(consoleWriteTimeout))
 			if err := conn.WriteJSON(gin.H{"error": errMsg}); err != nil {
-				log.Printf("websocket write error: %v", err)
+				slog.Warn("console websocket write error", "err", err)
 				return
 			}
 
 		case <-pingTicker.C:
 			conn.SetWriteDeadline(time.Now().Add(consoleWriteTimeout))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				log.Printf("websocket ping failed: %v", err)
+				slog.Warn("console websocket ping failed", "err", err)
 				return
 			}
 
