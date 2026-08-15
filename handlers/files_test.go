@@ -21,7 +21,7 @@ func TestSafePath_TraversalContained(t *testing.T) {
 	// Leading "/" + filepath.Clean collapses ".." segments at the root, so a
 	// traversal attempt resolves to a path safely inside the server dir
 	// rather than escaping it.
-	resolved, err := safePath("../../etc/passwd")
+	resolved, err := safePath(services.DefaultRuntime(), "../../etc/passwd")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -37,10 +37,10 @@ func TestSafePath_TraversalContained(t *testing.T) {
 func TestSafePath_ReservedControlDirDenied(t *testing.T) {
 	setupServerDir(t)
 
-	if _, err := safePath(".mcmanager/status.json"); err == nil {
+	if _, err := safePath(services.DefaultRuntime(), ".mcmanager/status.json"); err == nil {
 		t.Error("expected control dir path to be denied")
 	}
-	if _, err := safePath(".mcmanager"); err == nil {
+	if _, err := safePath(services.DefaultRuntime(), ".mcmanager"); err == nil {
 		t.Error("expected control dir itself to be denied")
 	}
 }
@@ -48,12 +48,56 @@ func TestSafePath_ReservedControlDirDenied(t *testing.T) {
 func TestSafePath_ValidPathResolves(t *testing.T) {
 	setupServerDir(t)
 
-	resolved, err := safePath("world/level.dat")
+	resolved, err := safePath(services.DefaultRuntime(), "world/level.dat")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	if !strings.HasSuffix(resolved, "world/level.dat") {
 		t.Errorf("expected resolved path to end with world/level.dat, got %q", resolved)
+	}
+}
+
+// TestSafePath_TraversalDeniedUnderArbitraryRuntime proves path traversal
+// stays impossible once safePath is anchored to a runtime instead of the
+// fixed ServerDir constant: it's this runtime's own Dir -- not
+// services.ServerDir -- that bounds every resolved path. That's what will
+// keep a malicious :sid unable to reach another server's files once routes
+// are namespaced in a later phase (see PLAN-multi-server.md, D4 and the
+// path-traversal row of the risk table).
+func TestSafePath_TraversalDeniedUnderArbitraryRuntime(t *testing.T) {
+	dir := t.TempDir()
+	rt := &services.ServerRuntime{ID: "other", Dir: dir}
+
+	resolved, err := safePath(rt, "../../etc/passwd")
+	if err != nil {
+		t.Fatalf("expected no error (traversal is collapsed, not rejected outright), got %v", err)
+	}
+
+	base, err := filepath.Abs(dir)
+	if err != nil {
+		t.Fatalf("failed to resolve base dir: %v", err)
+	}
+	if !strings.HasPrefix(resolved, base) {
+		t.Errorf("expected resolved path %q to stay within this runtime's own dir %q", resolved, base)
+	}
+
+	defaultBase, err := filepath.Abs(services.ServerDir)
+	if err != nil {
+		t.Fatalf("failed to resolve default server dir: %v", err)
+	}
+	if strings.HasPrefix(resolved, defaultBase) {
+		t.Errorf("resolved path %q leaked into the default server's directory %q instead of staying under %q", resolved, defaultBase, base)
+	}
+}
+
+// TestSafePath_ReservedControlDirDeniedUnderArbitraryRuntime mirrors
+// TestSafePath_ReservedControlDirDenied for a non-default runtime, since the
+// reserved-control-dir guard re-derives its own path from rt too.
+func TestSafePath_ReservedControlDirDeniedUnderArbitraryRuntime(t *testing.T) {
+	rt := &services.ServerRuntime{ID: "other", Dir: t.TempDir()}
+
+	if _, err := safePath(rt, ".mcmanager/status.json"); err == nil {
+		t.Error("expected control dir path to be denied")
 	}
 }
 

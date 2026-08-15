@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/lomokwa/mc-manager/db"
@@ -18,18 +17,14 @@ import (
 	"github.com/lomokwa/mc-manager/utils"
 )
 
-// backupMu serializes backup creation/restore/delete so a scheduled tick
-// can never race a manual request (or vice versa) against the same files.
-var backupMu sync.Mutex
-
 // backupNameRE matches the exact filenames CreateBackup generates. Any
 // externally-supplied "name" (restore/delete) is validated against this
 // before it ever touches the filesystem, which rules out path traversal.
 var backupNameRE = regexp.MustCompile(`^world-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z\.zip$`)
 
-// ListBackups returns all backups in BackupDir, newest first.
-func ListBackups() ([]types.BackupInfo, error) {
-	entries, err := os.ReadDir(BackupDir)
+// ListBackups returns all backups in this runtime's BackupDir, newest first.
+func (rt *ServerRuntime) ListBackups() ([]types.BackupInfo, error) {
+	entries, err := os.ReadDir(rt.BackupDir())
 	if err != nil {
 		if os.IsNotExist(err) {
 			// No backups dir yet means no backups have been made — not an error.
@@ -64,54 +59,54 @@ func ListBackups() ([]types.BackupInfo, error) {
 }
 
 // resolveBackupPath validates name against backupNameRE and returns its
-// absolute path inside BackupDir. This is the only way a caller-supplied
-// name should ever be turned into a filesystem path.
-func resolveBackupPath(name string) (string, error) {
+// absolute path inside this runtime's BackupDir. This is the only way a
+// caller-supplied name should ever be turned into a filesystem path.
+func (rt *ServerRuntime) resolveBackupPath(name string) (string, error) {
 	if !backupNameRE.MatchString(name) {
 		return "", fmt.Errorf("invalid backup name")
 	}
-	return filepath.Join(BackupDir, name), nil
+	return filepath.Join(rt.BackupDir(), name), nil
 }
 
-// CreateBackup snapshots the world directory (plus key config files) into a
-// new timestamped zip archive under BackupDir.
-func CreateBackup() (types.BackupInfo, error) {
-	backupMu.Lock()
-	defer backupMu.Unlock()
+// CreateBackup snapshots this runtime's world directory (plus key config
+// files) into a new timestamped zip archive under its BackupDir.
+func (rt *ServerRuntime) CreateBackup() (types.BackupInfo, error) {
+	rt.backupMu.Lock()
+	defer rt.backupMu.Unlock()
 
-	worldPath := filepath.Join(ServerDir, "world")
+	worldPath := filepath.Join(rt.Dir, "world")
 	if !utils.FileExists(worldPath) {
 		return types.BackupInfo{}, fmt.Errorf("no world to back up, start the server at least once first")
 	}
 
-	if err := os.MkdirAll(BackupDir, 0755); err != nil {
+	if err := os.MkdirAll(rt.BackupDir(), 0755); err != nil {
 		return types.BackupInfo{}, fmt.Errorf("failed to create backups directory: %w", err)
 	}
 
 	// If the server is running, flush pending chunk writes and pause
 	// autosave so the zip doesn't capture a half-written region file.
-	running := IsServerRunning()
+	running := rt.IsServerRunning()
 	if running {
-		if err := SendCommand("save-off"); err != nil {
+		if err := rt.SendCommand("save-off"); err != nil {
 			log.Printf("backup: failed to send save-off: %v", err)
 		}
-		if err := SendCommand("save-all flush"); err != nil {
+		if err := rt.SendCommand("save-all flush"); err != nil {
 			log.Printf("backup: failed to send save-all flush: %v", err)
 		}
 		// Give the server a moment to finish flushing before we start reading files.
 		time.Sleep(2 * time.Second)
 		defer func() {
-			if err := SendCommand("save-on"); err != nil {
+			if err := rt.SendCommand("save-on"); err != nil {
 				log.Printf("backup: failed to send save-on: %v", err)
 			}
 		}()
 	}
 
 	name := fmt.Sprintf("world-%s.zip", time.Now().UTC().Format("2006-01-02T15-04-05Z"))
-	finalPath := filepath.Join(BackupDir, name)
+	finalPath := filepath.Join(rt.BackupDir(), name)
 	tmpPath := finalPath + ".tmp"
 
-	if err := writeBackupZip(tmpPath, worldPath); err != nil {
+	if err := rt.writeBackupZip(tmpPath, worldPath); err != nil {
 		os.Remove(tmpPath)
 		return types.BackupInfo{}, fmt.Errorf("failed to create backup: %w", err)
 	}
@@ -143,10 +138,10 @@ var configFiles = []string{
 	"banned-ips.json",
 }
 
-// writeBackupZip streams worldPath and the known config files into a zip at
-// destPath. Files are copied via io.Copy so large worlds aren't loaded into
-// memory.
-func writeBackupZip(destPath, worldPath string) error {
+// writeBackupZip streams worldPath and this runtime's known config files
+// into a zip at destPath. Files are copied via io.Copy so large worlds
+// aren't loaded into memory.
+func (rt *ServerRuntime) writeBackupZip(destPath, worldPath string) error {
 	out, err := os.Create(destPath)
 	if err != nil {
 		return err
@@ -162,7 +157,7 @@ func writeBackupZip(destPath, worldPath string) error {
 		if fi.IsDir() {
 			return nil
 		}
-		rel, err := filepath.Rel(ServerDir, path)
+		rel, err := filepath.Rel(rt.Dir, path)
 		if err != nil {
 			return err
 		}
@@ -174,7 +169,7 @@ func writeBackupZip(destPath, worldPath string) error {
 	}
 
 	for _, f := range configFiles {
-		src := filepath.Join(ServerDir, f)
+		src := filepath.Join(rt.Dir, f)
 		if !utils.FileExists(src) {
 			continue
 		}
@@ -206,19 +201,19 @@ func addFileToZip(zw *zip.Writer, srcPath, zipPath string) error {
 	return err
 }
 
-// RestoreBackup replaces the live world/ directory with the contents of the
-// named backup. The server must be stopped first (enforced by the caller).
-// The existing world is moved aside rather than deleted outright, so a
-// failed extraction doesn't destroy the live world.
-func RestoreBackup(name string) error {
-	backupMu.Lock()
-	defer backupMu.Unlock()
+// RestoreBackup replaces this runtime's live world/ directory with the
+// contents of the named backup. The server must be stopped first (enforced
+// by the caller). The existing world is moved aside rather than deleted
+// outright, so a failed extraction doesn't destroy the live world.
+func (rt *ServerRuntime) RestoreBackup(name string) error {
+	rt.backupMu.Lock()
+	defer rt.backupMu.Unlock()
 
-	if IsServerRunning() {
+	if rt.IsServerRunning() {
 		return fmt.Errorf("stop the server before restoring a backup")
 	}
 
-	archivePath, err := resolveBackupPath(name)
+	archivePath, err := rt.resolveBackupPath(name)
 	if err != nil {
 		return err
 	}
@@ -226,7 +221,7 @@ func RestoreBackup(name string) error {
 		return fmt.Errorf("backup %q not found", name)
 	}
 
-	worldPath := filepath.Join(ServerDir, "world")
+	worldPath := filepath.Join(rt.Dir, "world")
 	backupWorldPath := worldPath + fmt.Sprintf(".bak-%d", time.Now().UnixNano())
 
 	if utils.FileExists(worldPath) {
@@ -235,7 +230,7 @@ func RestoreBackup(name string) error {
 		}
 	}
 
-	if err := extractBackupZip(archivePath, ServerDir); err != nil {
+	if err := extractBackupZip(archivePath, rt.Dir); err != nil {
 		// Roll back: restore the original world so we don't leave the
 		// server without any world at all.
 		os.RemoveAll(worldPath)
@@ -308,12 +303,12 @@ func extractZipFile(f *zip.File, target string) error {
 	return err
 }
 
-// DeleteBackup removes a single backup archive.
-func DeleteBackup(name string) error {
-	backupMu.Lock()
-	defer backupMu.Unlock()
+// DeleteBackup removes a single backup archive from this runtime's BackupDir.
+func (rt *ServerRuntime) DeleteBackup(name string) error {
+	rt.backupMu.Lock()
+	defer rt.backupMu.Unlock()
 
-	path, err := resolveBackupPath(name)
+	path, err := rt.resolveBackupPath(name)
 	if err != nil {
 		return err
 	}
@@ -324,10 +319,10 @@ func DeleteBackup(name string) error {
 }
 
 // BackupFilePath validates name and returns the absolute path to the backup
-// archive within BackupDir, for handlers that need to serve the file itself
-// (e.g. download). Read-only, so it doesn't need backupMu.
-func BackupFilePath(name string) (string, error) {
-	path, err := resolveBackupPath(name)
+// archive within this runtime's BackupDir, for handlers that need to serve
+// the file itself (e.g. download). Read-only, so it doesn't need backupMu.
+func (rt *ServerRuntime) BackupFilePath(name string) (string, error) {
+	path, err := rt.resolveBackupPath(name)
 	if err != nil {
 		return "", err
 	}
@@ -339,12 +334,12 @@ func BackupFilePath(name string) (string, error) {
 
 // PruneBackups deletes the oldest backups beyond the keep count. keep <= 0
 // means "keep everything" (no pruning).
-func PruneBackups(keep int) error {
+func (rt *ServerRuntime) PruneBackups(keep int) error {
 	if keep <= 0 {
 		return nil
 	}
 
-	backups, err := ListBackups() // already newest-first
+	backups, err := rt.ListBackups() // already newest-first
 	if err != nil {
 		return err
 	}
@@ -355,13 +350,20 @@ func PruneBackups(keep int) error {
 
 	var firstErr error
 	for _, b := range backups[keep:] {
-		path := filepath.Join(BackupDir, b.Name)
+		path := filepath.Join(rt.BackupDir(), b.Name)
 		if err := os.Remove(path); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
 }
+
+// LoadBackupConfig and SaveBackupConfig stay global/unscoped in Phase 1:
+// backup_config is still the single CHECK(id = 1) row it always was. Giving
+// it a server_id column (so each server can have its own schedule) is
+// PLAN-multi-server.md D1/Phase-3 work -- restructuring that single-row
+// constraint isn't worth risking here when Phase 1 only ever has the one
+// (default) server able to reach these code paths anyway.
 
 // LoadBackupConfig reads the single backup_config row, returning sane
 // defaults if it hasn't been created yet.
@@ -394,4 +396,34 @@ func SaveBackupConfig(cfg types.BackupConfig) error {
 		return fmt.Errorf("failed to save backup config: %w", err)
 	}
 	return nil
+}
+
+// --- Package-level wrappers over the default runtime ------------------------
+//
+// Everything below existed before Phase 1 introduced ServerRuntime and must
+// keep behaving identically for the single server that exists today (see
+// DefaultRuntime in runtime.go).
+
+func ListBackups() ([]types.BackupInfo, error) {
+	return DefaultRuntime().ListBackups()
+}
+
+func CreateBackup() (types.BackupInfo, error) {
+	return DefaultRuntime().CreateBackup()
+}
+
+func RestoreBackup(name string) error {
+	return DefaultRuntime().RestoreBackup(name)
+}
+
+func DeleteBackup(name string) error {
+	return DefaultRuntime().DeleteBackup(name)
+}
+
+func BackupFilePath(name string) (string, error) {
+	return DefaultRuntime().BackupFilePath(name)
+}
+
+func PruneBackups(keep int) error {
+	return DefaultRuntime().PruneBackups(keep)
 }

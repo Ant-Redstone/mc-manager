@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/lomokwa/mc-manager/types"
@@ -206,8 +205,8 @@ func PrepareServerFiles(serverDir string, createLaunchScript bool, configureProp
 	return nil
 }
 
-func loadUUIDs(filename string) (map[string]bool, error) {
-	data, err := os.ReadFile(filepath.Join(ServerDir, filename))
+func (rt *ServerRuntime) loadUUIDs(filename string) (map[string]bool, error) {
+	data, err := os.ReadFile(filepath.Join(rt.Dir, filename))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return make(map[string]bool), nil
@@ -238,45 +237,41 @@ func loadUUIDs(filename string) (map[string]bool, error) {
 // selton-mello-bot's own consoleStream.ts already uses for this same class of bug.
 var listResponseLine = regexp.MustCompile(`^\[\d{2}:\d{2}:\d{2}\] \[Server thread/INFO\]: There are \d+ of a max of \d+ players online:\s*(.*)$`)
 
-var (
-	onlinePlayersMu       sync.Mutex
-	onlinePlayersCache    []string
-	onlinePlayersCachedAt time.Time
-)
-
 // onlinePlayersCacheTTL: fetchOnlinePlayers doesn't just read a file -- it runs a REAL "/list" command
 // against the live Minecraft console and waits (up to 5s) for the reply. A caller polling this every few
 // seconds (e.g. a Discord bot's presence rotation) was paying that full round trip every single time.
 const onlinePlayersCacheTTL = 10 * time.Second
 
-// GetOnlinePlayers returns the currently-online player names, reusing a recent result within
-// onlinePlayersCacheTTL instead of re-querying the live server console on every call.
-func GetOnlinePlayers() ([]string, error) {
-	onlinePlayersMu.Lock()
-	if !onlinePlayersCachedAt.IsZero() && time.Since(onlinePlayersCachedAt) < onlinePlayersCacheTTL {
-		cached := onlinePlayersCache
-		onlinePlayersMu.Unlock()
+// GetOnlinePlayers returns this runtime's currently-online player names,
+// reusing a recent result within onlinePlayersCacheTTL instead of
+// re-querying the live server console on every call. The cache lives on rt
+// (see runtime.go), so two servers' player lists can never bleed together.
+func (rt *ServerRuntime) GetOnlinePlayers() ([]string, error) {
+	rt.onlinePlayersMu.Lock()
+	if !rt.onlinePlayersCached.IsZero() && time.Since(rt.onlinePlayersCached) < onlinePlayersCacheTTL {
+		cached := rt.onlinePlayersCache
+		rt.onlinePlayersMu.Unlock()
 		return cached, nil
 	}
-	onlinePlayersMu.Unlock()
+	rt.onlinePlayersMu.Unlock()
 
-	names, err := fetchOnlinePlayers()
+	names, err := rt.fetchOnlinePlayers()
 	if err != nil {
 		return nil, err
 	}
 
-	onlinePlayersMu.Lock()
-	onlinePlayersCache = names
-	onlinePlayersCachedAt = time.Now()
-	onlinePlayersMu.Unlock()
+	rt.onlinePlayersMu.Lock()
+	rt.onlinePlayersCache = names
+	rt.onlinePlayersCached = time.Now()
+	rt.onlinePlayersMu.Unlock()
 
 	return names, nil
 }
 
 // fetchOnlinePlayers is the original always-live implementation, now only ever reached through
-// GetOnlinePlayers' cache above: sends "list" to the server console and parses the real reply.
-func fetchOnlinePlayers() ([]string, error) {
-	hub := GetLogHub()
+// GetOnlinePlayers' cache above: sends "list" to this runtime's server console and parses the real reply.
+func (rt *ServerRuntime) fetchOnlinePlayers() ([]string, error) {
+	hub := rt.Hub
 	if hub == nil {
 		return nil, fmt.Errorf("log hub not available")
 	}
@@ -293,7 +288,7 @@ draining:
 		}
 	}
 
-	if err := SendCommand("list"); err != nil {
+	if err := rt.SendCommand("list"); err != nil {
 		return nil, err
 	}
 
@@ -321,8 +316,8 @@ draining:
 	}
 }
 
-func ListPlayers() ([]types.Player, error) {
-	data, err := os.ReadFile(filepath.Join(ServerDir, "usercache.json"))
+func (rt *ServerRuntime) ListPlayers() ([]types.Player, error) {
+	data, err := os.ReadFile(filepath.Join(rt.Dir, "usercache.json"))
 	if err != nil {
 		return nil, err
 	}
@@ -333,25 +328,25 @@ func ListPlayers() ([]types.Player, error) {
 	}
 
 	// Load status set
-	opSet, err := loadUUIDs("ops.json")
+	opSet, err := rt.loadUUIDs("ops.json")
 	if err != nil {
 		return nil, err
 	}
 
-	whitelistSet, err := loadUUIDs("whitelist.json")
+	whitelistSet, err := rt.loadUUIDs("whitelist.json")
 	if err != nil {
 		return nil, err
 	}
 
-	bannedSet, err := loadUUIDs("banned-players.json")
+	bannedSet, err := rt.loadUUIDs("banned-players.json")
 	if err != nil {
 		return nil, err
 	}
 
 	// Get online players
 	onlineSet := make(map[string]bool)
-	if IsServerRunning() {
-		names, err := GetOnlinePlayers()
+	if rt.IsServerRunning() {
+		names, err := rt.GetOnlinePlayers()
 		if err != nil {
 			log.Printf("could not find online players")
 			for _, n := range names {
@@ -378,25 +373,11 @@ func ListPlayers() ([]types.Player, error) {
 	return players, nil
 }
 
-func DeleteServer() error {
-	// Remove everything in the server directory except the directory itself
-	entries, err := os.ReadDir(ServerDir)
-	if err != nil {
-		return fmt.Errorf("failed to read server directory: %w", err)
-	}
-
-	for _, entry := range entries {
-		path := filepath.Join(ServerDir, entry.Name())
-		if err := os.RemoveAll(path); err != nil {
-			return fmt.Errorf("failed to remove %s: %w", path, err)
-		}
-	}
-
-	return nil
-}
-
-func GetServerProperties() (map[string]string, error) {
-	data, err := os.ReadFile(filepath.Join(ServerDir, "server.properties"))
+// GetServerProperties reads and parses this runtime's own server.properties
+// file (comments and blank lines skipped), rooted at rt.Dir rather than the
+// fixed ServerDir constant -- see PLAN-multi-server.md D4.
+func (rt *ServerRuntime) GetServerProperties() (map[string]string, error) {
+	data, err := os.ReadFile(filepath.Join(rt.Dir, "server.properties"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read server.properties: %w", err)
 	}
@@ -415,8 +396,10 @@ func GetServerProperties() (map[string]string, error) {
 	return props, nil
 }
 
-func UpdateServerProperties(properties map[string]string) error {
-	data, err := os.ReadFile(filepath.Join(ServerDir, "server.properties"))
+// UpdateServerProperties merges properties into this runtime's existing
+// server.properties, preserving any existing key not present in properties.
+func (rt *ServerRuntime) UpdateServerProperties(properties map[string]string) error {
+	data, err := os.ReadFile(filepath.Join(rt.Dir, "server.properties"))
 	if err != nil {
 		return fmt.Errorf("failed to read server.properties: %w", err)
 	}
@@ -442,5 +425,52 @@ func UpdateServerProperties(properties map[string]string) error {
 		fmt.Fprintf(&content, "%s=%s\n", k, v)
 	}
 
-	return utils.WriteFile(filepath.Join(ServerDir, "server.properties"), []byte(content.String()))
+	return utils.WriteFile(filepath.Join(rt.Dir, "server.properties"), []byte(content.String()))
+}
+
+// --- Package-level wrappers over the default runtime ------------------------
+//
+// All of these existed before Phase 1 introduced ServerRuntime and must keep
+// behaving identically for the single server that exists today (see
+// DefaultRuntime in runtime.go) -- in particular, ListPlayers is what
+// selton-mello-bot's flat /api/players call ultimately reaches, so this is
+// exactly the compatibility path PLAN-multi-server.md D3 requires.
+
+func GetOnlinePlayers() ([]string, error) {
+	return DefaultRuntime().GetOnlinePlayers()
+}
+
+func ListPlayers() ([]types.Player, error) {
+	return DefaultRuntime().ListPlayers()
+}
+
+func GetServerProperties() (map[string]string, error) {
+	return DefaultRuntime().GetServerProperties()
+}
+
+func UpdateServerProperties(properties map[string]string) error {
+	return DefaultRuntime().UpdateServerProperties(properties)
+}
+
+// DeleteServer removes everything in the (fixed, default-only) ServerDir
+// except the directory itself. Deliberately NOT a ServerRuntime method or
+// namespaced under /api/servers/:sid: it backs DELETE /api/server, which
+// PLAN-multi-server.md's Phase 3 scope explicitly leaves flat-only -- the
+// registry has no create/delete/update yet (that needs the Phase 2
+// supervisor to actually run more than one JVM first), so there is only
+// ever one server whose files this could mean.
+func DeleteServer() error {
+	entries, err := os.ReadDir(ServerDir)
+	if err != nil {
+		return fmt.Errorf("failed to read server directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		path := filepath.Join(ServerDir, entry.Name())
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("failed to remove %s: %w", path, err)
+		}
+	}
+
+	return nil
 }

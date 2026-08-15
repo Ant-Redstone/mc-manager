@@ -3,18 +3,59 @@ package handlers
 import (
 	"log"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/lomokwa/mc-manager/middleware"
 	"github.com/lomokwa/mc-manager/services"
+	"github.com/lomokwa/mc-manager/types"
 )
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		// TODO: restrict to allowed origins in production
-		return true
+		origin := r.Header.Get("Origin")
+		// Non-browser clients (the Discord bot, curl, scripts) send no Origin
+		// at all and stay allowed -- they still have to pass JWT/API-key auth.
+		// Browsers always send it, so this is what stops a random page the
+		// admin happens to visit from opening an authenticated console socket
+		// with their cookies/token and running commands (CSWSH).
+		return origin == "" || sameOrigin(origin, r.Host) || originAllowed(origin)
 	},
+}
+
+// sameOrigin reports whether the browser's Origin is this very host. A page
+// served from the same origin it is calling is not cross-site by definition,
+// so CSWSH cannot apply and there is nothing to block. Checking this first
+// matters operationally: a deployment that serves the panel and the API from
+// one host keeps working even if CORS_ALLOWED_ORIGINS was never set, instead
+// of the console silently dying the moment this check ships.
+func sameOrigin(origin, host string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || host == "" {
+		return false
+	}
+	return u.Host == host
+}
+
+// originAllowed reports whether a browser Origin may open the console
+// WebSocket. It reuses the REST API's CORS_ALLOWED_ORIGINS list (and its
+// same localhost fallback) so there is one allow-list to keep correct
+// rather than two that can drift apart.
+func originAllowed(origin string) bool {
+	raw := os.Getenv("CORS_ALLOWED_ORIGINS")
+	if strings.TrimSpace(raw) == "" {
+		return origin == "http://localhost:5173" || origin == "http://localhost:8080"
+	}
+	for _, p := range strings.Split(raw, ",") {
+		if strings.TrimSpace(p) == origin {
+			return true
+		}
+	}
+	return false
 }
 
 const (
@@ -28,16 +69,22 @@ const (
 // ConsoleHandler upgrades the connection to a WebSocket and streams
 // Minecraft server logs to the client while accepting commands from it.
 func ConsoleHandler(c *gin.Context) {
-	if !services.IsServerRunning() {
+	rt := runtimeFromRequest(c)
+
+	if !rt.IsServerRunning() {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "server is not running"})
 		return
 	}
 
-	hub := services.GetLogHub()
+	hub := rt.Hub
 	if hub == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "server log stream not available"})
 		return
 	}
+
+	// Read once, before the upgrade -- the route's RequirePermission(console.read)
+	// already confirmed a JWT is present, so this is always populated here.
+	userID, _ := middleware.UserIDFromContext(c)
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -84,7 +131,14 @@ func ConsoleHandler(c *gin.Context) {
 			if cmd == "" {
 				continue
 			}
-			if err := services.SendCommand(cmd); err != nil {
+			if !services.HasPermission(userID, classifyConsoleInput(cmd)) {
+				select {
+				case errCh <- "you don't have permission to send that":
+				default:
+				}
+				continue
+			}
+			if err := rt.SendCommand(cmd); err != nil {
 				log.Printf("failed to send command %q: %v", cmd, err)
 				select {
 				case errCh <- err.Error():
@@ -137,7 +191,7 @@ func ConsoleHandler(c *gin.Context) {
 			}
 
 		case <-statusTicker.C:
-			if !services.IsServerRunning() {
+			if !rt.IsServerRunning() {
 				conn.SetWriteDeadline(time.Now().Add(consoleWriteTimeout))
 				conn.WriteMessage(websocket.CloseMessage,
 					websocket.FormatCloseMessage(websocket.CloseNormalClosure, "server stopped"))
@@ -149,4 +203,20 @@ func ConsoleHandler(c *gin.Context) {
 			return
 		}
 	}
+}
+
+// classifyConsoleInput decides which permission a raw console line needs.
+// There is no separate chat channel -- "say <message>" IS how a broadcast is
+// sent from the server console (the same convention vanilla's own console
+// uses), so it's the one shape that counts as chat; everything else is a
+// command. This is deliberately simple rather than a full command parser: it
+// can't be fooled into treating a real command as chat (only a literal
+// leading "say" ever classifies that way), which is the direction that
+// matters for a permission check.
+func classifyConsoleInput(cmd string) types.Permission {
+	trimmed := strings.TrimSpace(cmd)
+	if strings.EqualFold(trimmed, "say") || strings.HasPrefix(strings.ToLower(trimmed), "say ") {
+		return types.PermConsoleChat
+	}
+	return types.PermConsoleCommands
 }
