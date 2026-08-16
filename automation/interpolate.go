@@ -2,6 +2,7 @@ package automation
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -28,15 +29,26 @@ var lineBreakCollapser = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ")
 // An unknown {name} is left literal rather than blanked, so a typo looks like a
 // typo instead of like missing data.
 func Interpolate(template string, vars map[string]string, forCommand bool) string {
-	out := template
-	for name, value := range vars {
+	// One pass over the template, not one pass per variable. Replacing in a
+	// loop re-scans text that was already substituted, so a "{server}" typed by
+	// a player inside {line} would expand or not depending on Go's random map
+	// iteration order -- the same input producing different output on different
+	// runs. A single pass makes substituted text inert by construction.
+	return placeholderRe.ReplaceAllStringFunc(template, func(match string) string {
+		value, ok := vars[match[1:len(match)-1]]
+		if !ok {
+			return match // unknown name stays literal: a typo should look like one
+		}
 		if forCommand {
 			value = lineBreakCollapser.Replace(value)
 		}
-		out = strings.ReplaceAll(out, "{"+name+"}", value)
-	}
-	return out
+		return value
+	})
 }
+
+// placeholderRe matches a {name} token. Deliberately narrow -- letters, digits
+// and underscore -- so arbitrary braces in a message are left alone.
+var placeholderRe = regexp.MustCompile(`\{[A-Za-z0-9_]+\}`)
 
 // ValidateAction rejects an action that cannot be made safe. It runs when a
 // rule is saved, so the author is told at write time rather than surprised at

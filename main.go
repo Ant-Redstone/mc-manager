@@ -104,7 +104,7 @@ func main() {
 		slog.Error("automations: failed to load rules", "err", err)
 	}
 	engine.Start()
-	services.StartSampler(engine.NeedsSampling)
+	services.StartSampler(engine.NeedsSampling, engine.TightestSampleWindow)
 
 	// Default to release mode (quieter, no debug overhead); set GIN_MODE=debug
 	// locally to get gin's verbose per-request logging during development.

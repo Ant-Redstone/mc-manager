@@ -45,15 +45,25 @@ func SampleInterval(window time.Duration) time.Duration {
 //
 // needs is the engine's NeedsSampling, read live on every tick: turning a rule
 // off has to stop its cost immediately, not at the next restart.
-func StartSampler(needs func(types.SampleKind) bool) func() {
+func StartSampler(needs func(types.SampleKind) bool, interval func() time.Duration) func() {
 	stop := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(minSampleInterval)
+		current := interval()
+		ticker := time.NewTicker(current)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
 				sampleOnce(needs)
+				// Re-read after each tick. Editing a rule's window, or
+				// disabling the rule that demanded a tight interval, has to
+				// change the cost immediately -- otherwise the interval is
+				// whatever happened to be configured at boot, which is how
+				// SampleInterval ended up computed and then ignored.
+				if next := interval(); next != current {
+					current = next
+					ticker.Reset(current)
+				}
 			case <-stop:
 				return
 			}
@@ -111,12 +121,19 @@ func sampleOnce(needs func(types.SampleKind) bool) {
 // sparkTPSLine matches a spark TPS reading: at least two comma-separated
 // decimals, each optionally starred when that window is degraded.
 //
-// It is anchored to the START of the payload (after spark's optional bolt tag)
-// and requires the whole line to be the reading. Chat is
-// "[HH:MM:SS] [Server thread/INFO]: <Name> text", so a player typing
-// "1.0, 2.0, 3.0, 4.0, 5.0" must not be readable as a catastrophic TPS -- that
-// would be a player able to trigger a rule that restarts the server.
-var sparkTPSLine = regexp.MustCompile(`^(?:\[⚡\]\s*)?\*?(\d+\.\d+)(?:,\s*\*?\d+\.\d+){1,}$`)
+// It is anchored to the REAL hub line, prefix included -- the same shape
+// listResponseLine uses for `list`. Every line the hub delivers carries
+// "[HH:MM:SS] [Server thread/INFO]: ", so a pattern that starts at the numbers
+// matches nothing in production: FetchTPS would time out on every sample and
+// TPS rules would never fire, while each tick stalled five seconds per server.
+//
+// The prefix also does security work. Chat arrives as
+// "[HH:MM:SS] [Server thread/INFO]: <Name> text", and requiring the reading to
+// fill the whole line after the prefix is what stops a player typing
+// "1.0, 2.0, 3.0, 4.0, 5.0" from being read as a catastrophic TPS -- which
+// would let them trigger a rule that restarts the server.
+var sparkTPSLine = regexp.MustCompile(
+	`^\[\d{2}:\d{2}:\d{2}\] \[Server thread/INFO\]:\s*(?:\[⚡\]\s*)?\*?(\d+\.\d+)(?:,\s*\*?\d+\.\d+){1,}$`)
 
 // ParseSparkTPS reads the shortest (5s) window from a spark tps reply, which is
 // the one that reacts fast enough to alert on.

@@ -123,6 +123,36 @@ func (e *Engine) NeedsSampling(k types.SampleKind) bool {
 	return false
 }
 
+// TightestSampleWindow reports the shortest "for at least N" any enabled
+// threshold rule asks for, which is what the sampler derives its interval from.
+//
+// Zero means nothing needs sampling; the sampler treats that as its floor and
+// keeps ticking cheaply (each tick with nothing configured is three map reads).
+// Reading the live rule set matters: editing a window, or disabling the rule
+// that demanded a tight one, has to change the cost immediately.
+func (e *Engine) TightestSampleWindow() time.Duration {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	var tightest time.Duration
+	for _, r := range e.rules {
+		switch r.TriggerKind {
+		case "tps", "count", "disk":
+		default:
+			continue
+		}
+		secs, _ := r.TriggerConfig["for_seconds"].(float64)
+		w := services.SampleInterval(time.Duration(secs) * time.Second)
+		if tightest == 0 || w < tightest {
+			tightest = w
+		}
+	}
+	if tightest == 0 {
+		return services.SampleInterval(0)
+	}
+	return tightest
+}
+
 // Start subscribes to the bus and begins consuming. Safe to call once.
 func (e *Engine) Start() {
 	ch := e.bus.Subscribe()
@@ -186,17 +216,46 @@ func (e *Engine) HandleEvent(ev types.Event) {
 		rule Rule
 		dec  Decision
 	}
-	for _, r := range rules {
+	for i, r := range rules {
 		d := Evaluate(r, ev, e.state)
 		if !d.Fire {
 			continue
 		}
 		e.state.InFlight[r.ID] = true
 		e.state.FiringsThisMinute[r.ID]++
+
+		// Stamp the CACHED rule here, not only the database row later.
+		// Evaluate reads LastFiredAt off e.rules, and e.rules is only
+		// refreshed by ReloadRules -- so persisting alone left the cooldown
+		// and every schedule reading a value from boot. That made a 1h
+		// cooldown allow five firings in a second, and an every-6h schedule
+		// run on every minute tick.
+		firedAt := e.state.Now
+		rules[i].LastFiredAt = &firedAt
+		for j := range e.rules {
+			if e.rules[j].ID == r.ID {
+				e.rules[j].LastFiredAt = &firedAt
+			}
+		}
+
+		// A threshold that is still held must not re-fire on the next sample.
+		// Clearing the window restarts it, so the rule needs another full
+		// "for at least N" before it can fire again. Without this, "TPS below
+		// 15 -> restart" with the schema's default cooldown of 0 is a restart
+		// loop on a live server.
+		delete(e.state.ConditionSince, r.ID)
+
+		// A join has happened, so the player is no longer new. Recording it
+		// here rather than at the next reload is what makes first_time_only
+		// mean once, instead of once per reload.
+		if player := d.Vars["player"]; player != "" && r.TriggerKind == "join" {
+			e.state.KnownPlayers[strings.ToLower(player)] = true
+		}
+
 		firing = append(firing, struct {
 			rule Rule
 			dec  Decision
-		}{r, d})
+		}{rules[i], d})
 	}
 	e.mu.Unlock()
 
@@ -222,10 +281,14 @@ func (e *Engine) fire(r Rule, d Decision) {
 			return
 		}
 
-		// Stamped at the START of the firing: a restart sequence takes
-		// minutes, and counting the cooldown from the end would silently add
-		// them to it.
-		if err := MarkFired(r.ID, e.now()); err != nil {
+		// Persist the stamp HandleEvent already applied to the cached rule.
+		// Using r.LastFiredAt rather than a fresh now() keeps the two copies
+		// identical, so a reload cannot move a cooldown that already started.
+		stamp := e.now()
+		if r.LastFiredAt != nil {
+			stamp = *r.LastFiredAt
+		}
+		if err := MarkFired(r.ID, stamp); err != nil {
 			slog.Error("automation: failed to record last_fired_at", "rule", r.ID, "err", err)
 		}
 

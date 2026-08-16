@@ -53,7 +53,7 @@ func TestSampleOnce_AsksForNothingWhenNoRuleWants(t *testing.T) {
 }
 
 func TestStartSampler_StopsCleanly(t *testing.T) {
-	stop := StartSampler(func(types.SampleKind) bool { return false })
+	stop := StartSampler(func(types.SampleKind) bool { return false }, func() time.Duration { return 10 * time.Millisecond })
 	stop()
 	// A second stop would panic on a closed channel if StartSampler returned a
 	// naive closer; calling it once and returning is enough to prove the
@@ -115,18 +115,21 @@ func TestTailer_BacklogReplayDoesNotReachTheAutomationBus(t *testing.T) {
 // health report prints the same numbers untagged. A starred value means that
 // window is degraded, which is exactly when a TPS rule should be reading it.
 func TestParseSparkTPS_ReadsTheShortestWindow(t *testing.T) {
+	// Every line the hub delivers carries this prefix.
+	const pre = "[12:00:00] [Server thread/INFO]: "
 	cases := []struct {
 		name string
 		line string
 		want float64
 		ok   bool
 	}{
-		{"header is not data", "[⚡] TPS from last 5s, 10s, 1m, 5m, 15m:", 0, false},
-		{"tagged and starred", "[⚡]  *19.8, *19.9, 20.0, 20.0, 20.0", 19.8, true},
-		{"untagged health report", " *5.2, 8.1, 15.0, 19.0, 20.0", 5.2, true},
-		{"healthy server", "[⚡]  20.0, 20.0, 20.0, 20.0, 20.0", 20.0, true},
+		{"header is not data", pre + "[⚡] TPS from last 5s, 10s, 1m, 5m, 15m:", 0, false},
+		{"tagged and starred", pre + "[⚡]  *19.8, *19.9, 20.0, 20.0, 20.0", 19.8, true},
+		{"untagged health report", pre + " *5.2, 8.1, 15.0, 19.0, 20.0", 5.2, true},
+		{"healthy server", pre + "[⚡]  20.0, 20.0, 20.0, 20.0, 20.0", 20.0, true},
 		{"unrelated console noise", "[12:00:00] [Server thread/INFO]: Notch joined the game", 0, false},
-		{"a single number is not a tps line", "[⚡] 19.8", 0, false},
+		{"a single number is not a tps line", pre + "[⚡] 19.8", 0, false},
+		{"numbers without the hub prefix are not a reading", "[⚡]  19.8, 19.9, 20.0", 0, false},
 	}
 	for _, tc := range cases {
 		got, ok := ParseSparkTPS(tc.line)
