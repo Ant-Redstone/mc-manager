@@ -184,6 +184,18 @@ func newRouter() *gin.Engine {
 	api.PUT("/users/:id/role", perm(types.PermAdminManageRoles), handlers.SetUserRoleHandler)
 	api.PUT("/users/:id/overrides", perm(types.PermAdminManageRoles), handlers.SetUserOverridesHandler)
 
+	// Automations. Flat, not namespaced under /api/servers/:sid: a rule carries
+	// its own server_id, and one screen lists rules across every server.
+	//
+	// Webhooks get their OWN prefix rather than /automations/webhooks. Gin
+	// cannot route a static segment and a wildcard at the same position, so
+	// that path next to /automations/:id panics at registration -- taking the
+	// whole API down at boot instead of failing one endpoint.
+	api.GET("/automations", perm(types.PermAutomationsView), handlers.ListAutomationsHandler)
+	api.GET("/automations/:id", perm(types.PermAutomationsView), handlers.GetAutomationHandler)
+	api.GET("/automations/:id/firings", perm(types.PermAutomationsView), handlers.ListAutomationFiringsHandler)
+	api.GET("/automation-webhooks", perm(types.PermAutomationsView), handlers.ListAutomationWebhooksHandler)
+
 	// Minecraft account linking (self-service, no extra permission beyond login)
 	api.GET("/me/mclink", handlers.GetMcLinkHandler)
 	api.POST("/me/mclink/start", handlers.StartMcLinkHandler)
