@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/lomokwa/mc-manager/automation"
@@ -138,5 +139,171 @@ func TestListFirings_ReturnsNewestFirst(t *testing.T) {
 	}
 	if len(resp.Data) != 2 || resp.Data[0].Trigger != "segundo" {
 		t.Errorf("expected newest first, got %+v", resp.Data)
+	}
+}
+
+// ValidateActions has existed since plan 1 and nothing called it. This is the
+// wiring that makes it real: until now a rule with {line} in a command action
+// could be stored, and the engine WOULD run it -- handing a player the console.
+func TestCreateAutomation_RefusesLineInACommand(t *testing.T) {
+	setupTestDB(t)
+	seedDefaultServer(t)
+
+	body := `{"server_id":"default","name":"perigoso","trigger_kind":"console",
+	          "trigger_config":{"pattern":"socorro"},
+	          "actions":[{"type":"command","command":"say vi: {line}"}]}`
+
+	w := call(CreateAutomationHandler, http.MethodPost, "/api/automations", body, nil)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "{line}") {
+		t.Errorf("the error must name the offending variable, got %s", w.Body.String())
+	}
+	rules, _ := automation.ListRules()
+	if len(rules) != 0 {
+		t.Error("the rejected rule must not have been stored")
+	}
+}
+
+func TestCreateAutomation_StoresAValidRuleAndReloadsTheEngine(t *testing.T) {
+	setupTestDB(t)
+	seedDefaultServer(t)
+
+	reloaded := 0
+	SetEngineReloader(func() error { reloaded++; return nil })
+	t.Cleanup(func() { SetEngineReloader(nil) })
+
+	body := `{"server_id":"default","name":"avisa","trigger_kind":"stop",
+	          "trigger_config":{},"cooldown_seconds":60,
+	          "actions":[{"type":"backup"}]}`
+
+	w := call(CreateAutomationHandler, http.MethodPost, "/api/automations", body, nil)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	rules, _ := automation.ListRules()
+	if len(rules) != 1 || rules[0].Name != "avisa" {
+		t.Fatalf("expected the rule to be stored, got %+v", rules)
+	}
+	if !rules[0].StopOnFailure {
+		t.Error("stop_on_failure must default to true when the client omits it")
+	}
+	// A rule that only takes effect after a deploy is a rule the user will
+	// assume is broken.
+	if reloaded != 1 {
+		t.Errorf("expected the engine to be reloaded once, got %d", reloaded)
+	}
+}
+
+func TestCreateAutomation_RejectsAnUnknownServerOrTrigger(t *testing.T) {
+	setupTestDB(t)
+	seedDefaultServer(t)
+
+	for _, tc := range []struct{ name, body string }{
+		{"unknown server", `{"server_id":"nao-existe","name":"x","trigger_kind":"stop","trigger_config":{},"actions":[{"type":"backup"}]}`},
+		{"unknown trigger", `{"server_id":"default","name":"x","trigger_kind":"launch-missiles","trigger_config":{},"actions":[{"type":"backup"}]}`},
+		{"no actions", `{"server_id":"default","name":"vazia","trigger_kind":"stop","trigger_config":{},"actions":[]}`},
+		{"no name", `{"server_id":"default","name":"  ","trigger_kind":"stop","trigger_config":{},"actions":[{"type":"backup"}]}`},
+		{"negative cooldown", `{"server_id":"default","name":"x","trigger_kind":"stop","trigger_config":{},"cooldown_seconds":-5,"actions":[{"type":"backup"}]}`},
+	} {
+		w := call(CreateAutomationHandler, http.MethodPost, "/api/automations", tc.body, nil)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: expected 400, got %d: %s", tc.name, w.Code, w.Body.String())
+		}
+	}
+}
+
+// A client must not be able to set last_fired_at: it is what the cooldown
+// reads, so posting it would bypass every cooldown in the system.
+func TestCreateAutomation_IgnoresClientSuppliedFiringState(t *testing.T) {
+	setupTestDB(t)
+	seedDefaultServer(t)
+
+	body := `{"server_id":"default","name":"x","trigger_kind":"stop","trigger_config":{},
+	          "cooldown_seconds":3600,"actions":[{"type":"backup"}],
+	          "id":999,"last_fired_at":"2020-01-01T00:00:00Z","created_at":"2020-01-01T00:00:00Z"}`
+
+	w := call(CreateAutomationHandler, http.MethodPost, "/api/automations", body, nil)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	rules, _ := automation.ListRules()
+	if len(rules) != 1 {
+		t.Fatalf("expected one rule, got %d", len(rules))
+	}
+	if rules[0].ID == 999 {
+		t.Error("a client set the primary key")
+	}
+	if rules[0].LastFiredAt != nil {
+		t.Error("a client set last_fired_at, which would bypass the cooldown")
+	}
+}
+
+func TestUpdateAutomation_ValidatesTheSameWayAsCreate(t *testing.T) {
+	setupTestDB(t)
+	seedDefaultServer(t)
+	id := newRule(t, "ok")
+
+	body := `{"server_id":"default","name":"agora perigosa","trigger_kind":"console",
+	          "trigger_config":{"pattern":"x"},
+	          "actions":[{"type":"command","command":"say {line}"}]}`
+
+	w := call(UpdateAutomationHandler, http.MethodPut, "/api/automations/1", body,
+		gin.Params{{Key: "id", Value: strconv.Itoa(id)}})
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("an update must validate exactly like a create, got %d", w.Code)
+	}
+	got, _ := automation.GetRule(id)
+	if got.Name != "ok" {
+		t.Error("the rejected update must not have been applied")
+	}
+}
+
+func TestUpdateAutomation_404sForAnUnknownRule(t *testing.T) {
+	setupTestDB(t)
+	seedDefaultServer(t)
+
+	body := `{"server_id":"default","name":"x","trigger_kind":"stop","trigger_config":{},"actions":[{"type":"backup"}]}`
+	w := call(UpdateAutomationHandler, http.MethodPut, "/api/automations/9999", body,
+		gin.Params{{Key: "id", Value: "9999"}})
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+// Editing a rule must not clear its firing history. If it did, "edit the name"
+// would be a free cooldown reset -- the cheapest possible way to bypass the one
+// control that stops a rule from running in a loop.
+func TestUpdateAutomation_PreservesTheCooldownState(t *testing.T) {
+	setupTestDB(t)
+	seedDefaultServer(t)
+	id := newRule(t, "antes")
+	if err := automation.MarkFired(id, time.Now()); err != nil {
+		t.Fatalf("MarkFired: %v", err)
+	}
+
+	body := `{"server_id":"default","name":"depois","trigger_kind":"stop",
+	          "trigger_config":{},"cooldown_seconds":3600,"actions":[{"type":"backup"}]}`
+	w := call(UpdateAutomationHandler, http.MethodPut, "/api/automations/1", body,
+		gin.Params{{Key: "id", Value: strconv.Itoa(id)}})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	got, err := automation.GetRule(id)
+	if err != nil {
+		t.Fatalf("GetRule: %v", err)
+	}
+	if got.Name != "depois" {
+		t.Errorf("the edit was not applied, name is %q", got.Name)
+	}
+	if got.LastFiredAt == nil {
+		t.Error("editing a rule cleared last_fired_at, which resets its cooldown")
 	}
 }

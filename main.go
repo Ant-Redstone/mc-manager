@@ -106,6 +106,12 @@ func main() {
 	engine.Start()
 	services.StartSampler(engine.NeedsSampling, engine.TightestSampleWindow)
 
+	// The engine holds its rules in memory, so a write through the API has to
+	// tell it to re-read them. Without this line every edit would silently need
+	// a restart to take effect -- and a rule that does nothing after you saved
+	// it reads as a broken feature, not as a stale cache.
+	handlers.SetEngineReloader(engine.ReloadRules)
+
 	// Default to release mode (quieter, no debug overhead); set GIN_MODE=debug
 	// locally to get gin's verbose per-request logging during development.
 	if mode := os.Getenv("GIN_MODE"); mode != "" {
@@ -195,6 +201,12 @@ func newRouter() *gin.Engine {
 	api.GET("/automations/:id", perm(types.PermAutomationsView), handlers.GetAutomationHandler)
 	api.GET("/automations/:id/firings", perm(types.PermAutomationsView), handlers.ListAutomationFiringsHandler)
 	api.GET("/automation-webhooks", perm(types.PermAutomationsView), handlers.ListAutomationWebhooksHandler)
+
+	// Writes need automations.manage, not automations.view. A rule can run
+	// console commands, so this permission is as powerful as console access --
+	// which is why the built-in Moderator role gets view and not manage.
+	api.POST("/automations", perm(types.PermAutomationsManage), handlers.CreateAutomationHandler)
+	api.PUT("/automations/:id", perm(types.PermAutomationsManage), handlers.UpdateAutomationHandler)
 
 	// Minecraft account linking (self-service, no extra permission beyond login)
 	api.GET("/me/mclink", handlers.GetMcLinkHandler)

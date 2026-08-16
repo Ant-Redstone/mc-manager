@@ -299,3 +299,17 @@ func dueBySchedule(cfg map[string]any, last *time.Time, now time.Time) bool {
 	}
 	return false
 }
+
+// knownTriggers is the closed set the API validates against. Storing an
+// unknown kind would create a rule that can never fire and never explains why
+// -- it would simply sit in the list looking configured.
+var knownTriggers = map[string]bool{
+	"console": true, "join": true, "leave": true,
+	"start": true, "stop": true,
+	"tps": true, "count": true, "disk": true,
+	"backup-ok": true, "backup-fail": true,
+	"sched": true,
+}
+
+// IsKnownTrigger reports whether the matcher handles this trigger kind.
+func IsKnownTrigger(kind string) bool { return knownTriggers[kind] }

@@ -493,3 +493,19 @@ func TestGuard_ZeroCooldownDoesNotBlock(t *testing.T) {
 		t.Errorf("a zero cooldown must not block, got %q", d.Reason)
 	}
 }
+
+// A trigger the matcher supports but the API rejects is exactly as broken as
+// the reverse, and both fail silently -- the rule just never works.
+func TestIsKnownTrigger_CoversEveryTriggerTheMatcherHandles(t *testing.T) {
+	for _, kind := range []string{
+		"console", "join", "leave", "start", "stop",
+		"tps", "count", "disk", "backup-ok", "backup-fail", "sched",
+	} {
+		if !IsKnownTrigger(kind) {
+			t.Errorf("the matcher handles %q but the API would reject it", kind)
+		}
+	}
+	if IsKnownTrigger("launch-missiles") {
+		t.Error("an unknown trigger must be rejected")
+	}
+}
