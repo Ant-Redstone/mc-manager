@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -629,4 +630,55 @@ func TestSendWebhookTest_404sForAnUnknownWebhook(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", w.Code)
 	}
+}
+
+// The wire shape, key by key. The list test above only checks that the rule's
+// NAME appears in the body -- which is true whether the field is called "name"
+// or "Name", so it cannot tell a working API from one no client can read.
+//
+// This is what caught it: every other type in this feature emits snake_case,
+// Rule emitted Go field names, and a client could create a rule and then never
+// read one back.
+func TestAutomationJSON_UsesTheSameSnakeCaseAsEverythingElse(t *testing.T) {
+	setupTestDB(t)
+	seedDefaultServer(t)
+	newRule(t, "avisa")
+
+	w := call(ListAutomationsHandler, http.MethodGet, "/api/automations", "", nil)
+
+	var resp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Data) != 1 {
+		t.Fatalf("expected one rule, got %d", len(resp.Data))
+	}
+
+	for _, key := range []string{
+		"id", "server_id", "name", "enabled", "trigger_kind", "trigger_config",
+		"actions", "cooldown_seconds", "stop_on_failure", "deaf_window_seconds",
+		"last_fired_at", "created_at",
+	} {
+		if _, ok := resp.Data[0][key]; !ok {
+			t.Errorf("missing %q on the wire; got keys %v", key, keysOf(resp.Data[0]))
+		}
+	}
+	// And the Go names must NOT be there, or both spellings would ship and the
+	// next reader would have to guess which one is the contract.
+	for _, wrong := range []string{"ID", "ServerID", "TriggerKind", "CooldownSeconds"} {
+		if _, ok := resp.Data[0][wrong]; ok {
+			t.Errorf("%q leaked the Go field name onto the wire", wrong)
+		}
+	}
+}
+
+func keysOf(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

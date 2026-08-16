@@ -31,20 +31,25 @@ type Action struct {
 
 // Rule is one automation. ServerID binds it to a single server: TPS and
 // console lines are per-server by nature, since each server has its own hub.
+//
+// The json tags are not decoration. Without them Go emits the field names --
+// "ID", "ServerID", "TriggerKind" -- while Action, Webhook and Firing right
+// below all emit snake_case, and so does every other type this API returns. A
+// client could create a rule and then never read one back.
 type Rule struct {
-	ID                int
-	ServerID          string
-	Name              string
-	Enabled           bool
-	TriggerKind       string
-	TriggerConfig     map[string]any
-	Actions           []Action
-	CooldownSeconds   int
-	StopOnFailure     bool
-	DeafWindowSeconds int
-	LastFiredAt       *time.Time
-	CreatedBy         *int
-	CreatedAt         time.Time
+	ID                int            `json:"id"`
+	ServerID          string         `json:"server_id"`
+	Name              string         `json:"name"`
+	Enabled           bool           `json:"enabled"`
+	TriggerKind       string         `json:"trigger_kind"`
+	TriggerConfig     map[string]any `json:"trigger_config"`
+	Actions           []Action       `json:"actions"`
+	CooldownSeconds   int            `json:"cooldown_seconds"`
+	StopOnFailure     bool           `json:"stop_on_failure"`
+	DeafWindowSeconds int            `json:"deaf_window_seconds"`
+	LastFiredAt       *time.Time     `json:"last_fired_at"`
+	CreatedBy         *int           `json:"created_by"`
+	CreatedAt         time.Time      `json:"created_at"`
 }
 
 // Webhook is a Discord destination. URL carries a value only when loaded
