@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -74,7 +75,7 @@ func PostDiscord(url, content, mention string) (int, error) {
 	// the part that tells an admin what to fix. Bounded, because an error
 	// string ends up in the database and on screen.
 	detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	msg := explain(detail)
+	msg := redactURL(explain(detail), url)
 	if msg == "" {
 		return resp.StatusCode, fmt.Errorf("webhook rejected with %d", resp.StatusCode)
 	}
@@ -91,6 +92,35 @@ func PostDiscord(url, content, mention string) (int, error) {
 // Anything that is not that shape is returned as-is: a proxy's HTML, a plain
 // sentence, an empty body. Guessing further would risk hiding the one line
 // that explains the failure.
+// redactURL removes the destination from text that came back from the network.
+//
+// Every other guard in this file stops OUR code from writing the URL down. This
+// one stops someone else's: a proxy, a captive portal or a WAF in front of an
+// outbound request routinely echoes the request line it refused, and that text
+// becomes the error we store in last_error, render on the destinations list,
+// and log. The one value in this feature that must never be written down would
+// be written down three times, by a component nobody here controls.
+//
+// The path is redacted as well as the whole URL, because "no route for
+// /1234/TOKEN" gives away the secret half without the scheme and host. Query
+// and fragment are dropped first so a URL echoed back with either still
+// matches. The status code survives -- redacting is not worth costing the admin
+// the one fact that says what went wrong.
+func redactURL(text, raw string) string {
+	if text == "" {
+		return text
+	}
+	text = strings.ReplaceAll(text, raw, "[destino]")
+	if u, err := neturl.Parse(raw); err == nil && u.Path != "" && u.Path != "/" {
+		text = strings.ReplaceAll(text, u.Path, "[destino]")
+		// The token on its own, which is the half that matters.
+		if i := strings.LastIndex(u.Path, "/"); i >= 0 && i+1 < len(u.Path) {
+			text = strings.ReplaceAll(text, u.Path[i+1:], "[destino]")
+		}
+	}
+	return text
+}
+
 func explain(body []byte) string {
 	var d struct {
 		Message string `json:"message"`

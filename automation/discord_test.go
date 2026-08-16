@@ -2,6 +2,7 @@ package automation
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -179,5 +180,56 @@ func TestExplain_PassesThroughAnythingElse(t *testing.T) {
 		if got := explain([]byte(tc.in)); got != tc.want {
 			t.Errorf("explain(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// The gap the other three leave open. They prove the URL does not come from Go
+// -- transport errors, parse errors, our own wording -- and all of them answer
+// with an EMPTY body, so none of them exercises the path where the response
+// body itself becomes the error string.
+//
+// That path is real. A proxy, a captive portal or a WAF sitting in front of an
+// outbound request routinely echoes the URL it refused, and that string is
+// stored in last_error, rendered on the destinations list, and logged. The one
+// value in this feature that must never be written down would then be written
+// down three times, by a component nobody here controls.
+func TestDiscord_ARefusalBodyThatEchoesTheURLIsRedacted(t *testing.T) {
+	var url string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		// What a proxy actually does: repeat the request line back.
+		fmt.Fprintf(w, "Cannot POST %s", url)
+	}))
+	t.Cleanup(srv.Close)
+	url = srv.URL + "/1234/SUPERSECRETTOKEN"
+
+	_, err := PostDiscord(url, "oi", "")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "SUPERSECRETTOKEN") {
+		t.Errorf("a refusal body carried the webhook token into the error: %q", err)
+	}
+	// The status still has to survive, or redacting has cost the admin the one
+	// fact that says what went wrong.
+	if !strings.Contains(err.Error(), "502") {
+		t.Errorf("the status was lost along with the URL: %q", err)
+	}
+}
+
+// The token alone, without the scheme and host, is still the secret half.
+func TestDiscord_ARefusalBodyEchoingOnlyThePathIsRedacted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprintf(w, "no route for %s", r.URL.Path)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := PostDiscord(srv.URL+"/1234/SUPERSECRETTOKEN", "oi", "")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.Contains(err.Error(), "SUPERSECRETTOKEN") {
+		t.Errorf("a refusal body carried the token into the error: %q", err)
 	}
 }
