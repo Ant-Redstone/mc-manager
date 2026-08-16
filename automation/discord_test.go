@@ -155,3 +155,29 @@ func TestDiscord_MalformedURLDoesNotLeakItEither(t *testing.T) {
 		t.Errorf("the webhook URL leaked into a parse error: %q", err)
 	}
 }
+
+// The refusal string is what an admin reads off a list row. Discord wraps its
+// one useful sentence in JSON, and showing the wrapper is most of the way to
+// not showing the sentence.
+func TestExplain_PullsDiscordsSentenceOutOfItsJSON(t *testing.T) {
+	got := explain([]byte(`{"message": "Invalid Webhook Token", "code": 50027}`))
+	if got != "Invalid Webhook Token" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// Anything that is not that shape is passed through. Guessing further would
+// risk hiding the one line that explains the failure.
+func TestExplain_PassesThroughAnythingElse(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"<html>502 Bad Gateway</html>", "<html>502 Bad Gateway</html>"},
+		{"  rate limited  ", "rate limited"},
+		{`{"code": 50027}`, `{"code": 50027}`},
+		{`{"message": "   "}`, `{"message": "   "}`},
+		{"", ""},
+	} {
+		if got := explain([]byte(tc.in)); got != tc.want {
+			t.Errorf("explain(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

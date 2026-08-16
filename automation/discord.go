@@ -74,9 +74,29 @@ func PostDiscord(url, content, mention string) (int, error) {
 	// the part that tells an admin what to fix. Bounded, because an error
 	// string ends up in the database and on screen.
 	detail, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	msg := strings.TrimSpace(string(detail))
+	msg := explain(detail)
 	if msg == "" {
 		return resp.StatusCode, fmt.Errorf("webhook rejected with %d", resp.StatusCode)
 	}
 	return resp.StatusCode, fmt.Errorf("webhook rejected with %d: %s", resp.StatusCode, msg)
+}
+
+// explain pulls the human sentence out of a refusal body.
+//
+// Discord answers with {"message": "Invalid Webhook Token", "code": 50027}, and
+// this string is what an admin reads off a list row. Showing the raw JSON puts
+// the answer on screen wrapped in punctuation and a number that means nothing
+// to them -- which is most of the way to not showing it.
+//
+// Anything that is not that shape is returned as-is: a proxy's HTML, a plain
+// sentence, an empty body. Guessing further would risk hiding the one line
+// that explains the failure.
+func explain(body []byte) string {
+	var d struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &d); err == nil && strings.TrimSpace(d.Message) != "" {
+		return strings.TrimSpace(d.Message)
+	}
+	return strings.TrimSpace(string(body))
 }
