@@ -105,7 +105,13 @@ func Evaluate(r Rule, ev types.Event, st MatchState) Decision {
 func matchesTrigger(r Rule, ev types.Event, st MatchState) (bool, string, map[string]string) {
 	switch e := ev.(type) {
 	case types.ConsoleLineEvent:
-		if e.ServerID != r.ServerID || r.TriggerKind != "console" {
+		if e.ServerID != r.ServerID {
+			return false, "", nil
+		}
+		if r.TriggerKind == "join" || r.TriggerKind == "leave" {
+			return matchesPlayerEvent(r, e, st)
+		}
+		if r.TriggerKind != "console" {
 			return false, "", nil
 		}
 		pattern, _ := r.TriggerConfig["pattern"].(string)
@@ -147,6 +153,12 @@ func matchesTrigger(r Rule, ev types.Event, st MatchState) (bool, string, map[st
 			return false, "", nil
 		}
 		return thresholdHeld(r, e, st)
+
+	case types.ScheduleTick:
+		if r.TriggerKind != "sched" || !dueBySchedule(r.TriggerConfig, r.LastFiredAt, st.Now) {
+			return false, "", nil
+		}
+		return true, "schedule", map[string]string{"server": r.ServerID}
 	}
 	return false, "", nil
 }
@@ -218,4 +230,72 @@ func lineMatches(pattern, line string) bool {
 		return re.MatchString(line)
 	}
 	return strings.Contains(line, pattern)
+}
+
+// playerEventRe anchors to the real "[HH:MM:SS] [Server thread/INFO]: " prefix
+// AND to a bare name filling the rest of the line.
+//
+// Both anchors are load-bearing. Vanilla chat is "<Name> text", so a player
+// can type "Notch joined the game" verbatim; without anchoring, that chat line
+// fires a join rule, and a join rule can run console commands. The Discord bot
+// in this project learned the same lesson the hard way.
+var playerEventRe = regexp.MustCompile(
+	`^\[\d{2}:\d{2}:\d{2}\] \[Server thread/INFO\]: ([A-Za-z0-9_]{1,16}) (joined|left) the game$`)
+
+func parsePlayerEvent(line string) (name string, joined bool, ok bool) {
+	m := playerEventRe.FindStringSubmatch(line)
+	if m == nil {
+		return "", false, false
+	}
+	return m[1], m[2] == "joined", true
+}
+
+func matchesPlayerEvent(r Rule, e types.ConsoleLineEvent, st MatchState) (bool, string, map[string]string) {
+	name, joined, ok := parsePlayerEvent(e.Line)
+	if !ok {
+		return false, "", nil
+	}
+	if joined != (r.TriggerKind == "join") {
+		return false, "", nil
+	}
+	if first, _ := r.TriggerConfig["first_time_only"].(bool); first && st.KnownPlayers[strings.ToLower(name)] {
+		return false, "", nil
+	}
+	verb := "joined"
+	if !joined {
+		verb = "left"
+	}
+	return true, name + " " + verb, map[string]string{"player": name, "server": r.ServerID}
+}
+
+// dueBySchedule answers "should this run now", given when it last ran.
+//
+// The tick arrives every minute and this decides, so the schedule is driven by
+// last_fired_at rather than an in-memory timer: an API restart neither skips a
+// daily job nor fires it twice. Anything unparseable is never due -- a typo in
+// a cron field must not become an hourly restart.
+func dueBySchedule(cfg map[string]any, last *time.Time, now time.Time) bool {
+	switch mode, _ := cfg["mode"].(string); mode {
+	case "every":
+		hours, _ := cfg["hours"].(float64)
+		if hours <= 0 {
+			return false
+		}
+		return last == nil || now.Sub(*last) >= time.Duration(hours*float64(time.Hour))
+
+	case "daily":
+		hhmm, _ := cfg["time"].(string)
+		target, err := time.Parse("15:04", hhmm)
+		if err != nil {
+			return false
+		}
+		due := time.Date(now.Year(), now.Month(), now.Day(), target.Hour(), target.Minute(), 0, 0, now.Location())
+		if now.Before(due) {
+			return false
+		}
+		// Without this, a daily 05:00 job fires again at 05:01, 05:02, and
+		// every minute until midnight.
+		return last == nil || last.Before(due)
+	}
+	return false
 }

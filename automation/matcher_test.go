@@ -236,3 +236,120 @@ func TestMatch_SampleKindMustAgreeWithTheTrigger(t *testing.T) {
 		t.Error("a disk sample fired a TPS rule")
 	}
 }
+
+func TestMatch_JoinAndLeaveComeFromConsoleLines(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+	join := Rule{ID: 1, ServerID: "default", Enabled: true, TriggerKind: "join", TriggerConfig: map[string]any{}}
+	leave := Rule{ID: 2, ServerID: "default", Enabled: true, TriggerKind: "leave", TriggerConfig: map[string]any{}}
+
+	joined := types.ConsoleLineEvent{ServerID: "default", Line: "[12:00:00] [Server thread/INFO]: Notch joined the game", At: now}
+	left := types.ConsoleLineEvent{ServerID: "default", Line: "[12:00:00] [Server thread/INFO]: Notch left the game", At: now}
+
+	d := Evaluate(join, joined, freshState(now))
+	if !d.Fire {
+		t.Fatalf("expected a join to fire the join rule: %q", d.Reason)
+	}
+	if d.Vars["player"] != "Notch" {
+		t.Errorf("expected {player} to be available, got %v", d.Vars)
+	}
+	if Evaluate(join, left, freshState(now)).Fire {
+		t.Error("a leave fired the join rule")
+	}
+	if !Evaluate(leave, left, freshState(now)).Fire {
+		t.Error("expected a leave to fire the leave rule")
+	}
+}
+
+// Vanilla chat is "<Name> text", so a player can type "Notch joined the game"
+// verbatim. Without anchoring to the real server-thread prefix AND a bare
+// name, that chat line fires a join rule -- and a join rule can run console
+// commands. Same anchoring lesson the Discord bot had to learn.
+func TestMatch_ChatCannotImpersonateAJoin(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+	join := Rule{ID: 1, ServerID: "default", Enabled: true, TriggerKind: "join", TriggerConfig: map[string]any{}}
+
+	for _, hostile := range []string{
+		"[12:00:00] [Server thread/INFO]: <Ant_Redstone> Notch joined the game",
+		"[12:00:00] [Server thread/INFO]: <Ant> hey Notch joined the game lol",
+	} {
+		if Evaluate(join, types.ConsoleLineEvent{ServerID: "default", Line: hostile, At: now}, freshState(now)).Fire {
+			t.Errorf("chat impersonated a join: %q", hostile)
+		}
+	}
+}
+
+func TestMatch_FirstTimeOnlySkipsAKnownPlayer(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+	r := Rule{
+		ID: 1, ServerID: "default", Enabled: true, TriggerKind: "join",
+		TriggerConfig: map[string]any{"first_time_only": true},
+	}
+	line := types.ConsoleLineEvent{ServerID: "default", Line: "[12:00:00] [Server thread/INFO]: Notch joined the game", At: now}
+
+	st := freshState(now)
+	st.KnownPlayers = map[string]bool{"notch": true} // lowercased on purpose
+	if Evaluate(r, line, st).Fire {
+		t.Error("first_time_only fired for a player who has joined before")
+	}
+
+	fresh := freshState(now)
+	if !Evaluate(r, line, fresh).Fire {
+		t.Error("first_time_only should fire for a genuinely new player")
+	}
+}
+
+func TestSchedule_EveryNHours(t *testing.T) {
+	cfg := map[string]any{"mode": "every", "hours": 6.0}
+	now := at("2026-08-16T12:00:00Z")
+
+	if !dueBySchedule(cfg, nil, now) {
+		t.Error("a schedule that has never run should be due")
+	}
+	recent := now.Add(-time.Hour)
+	if dueBySchedule(cfg, &recent, now) {
+		t.Error("not due yet: only an hour has passed of six")
+	}
+	old := now.Add(-7 * time.Hour)
+	if !dueBySchedule(cfg, &old, now) {
+		t.Error("due: more than six hours have passed")
+	}
+}
+
+func TestSchedule_DailyAtATimeFiresOncePerDay(t *testing.T) {
+	cfg := map[string]any{"mode": "daily", "time": "05:00"}
+
+	before := at("2026-08-16T04:59:00Z")
+	if dueBySchedule(cfg, nil, before) {
+		t.Error("not due before the configured time")
+	}
+	after := at("2026-08-16T05:00:30Z")
+	if !dueBySchedule(cfg, nil, after) {
+		t.Error("due at the configured time")
+	}
+
+	// The tick arrives every minute. Without the last-run check, a daily 05:00
+	// restart would fire again at 05:01, 05:02, and every minute until
+	// midnight.
+	ranToday := at("2026-08-16T05:00:10Z")
+	if dueBySchedule(cfg, &ranToday, after) {
+		t.Error("a daily schedule fired twice in one day")
+	}
+	tomorrow := at("2026-08-17T05:00:30Z")
+	if !dueBySchedule(cfg, &ranToday, tomorrow) {
+		t.Error("expected it to be due again the next day")
+	}
+}
+
+func TestSchedule_GarbageConfigNeverFires(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+	for _, cfg := range []map[string]any{
+		{},
+		{"mode": "every", "hours": 0.0},
+		{"mode": "daily", "time": "not a time"},
+		{"mode": "whatever"},
+	} {
+		if dueBySchedule(cfg, nil, now) {
+			t.Errorf("an unusable schedule config must never be due: %v", cfg)
+		}
+	}
+}
