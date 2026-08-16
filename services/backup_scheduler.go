@@ -1,7 +1,7 @@
 package services
 
 import (
-	"log"
+	"log/slog"
 	"time"
 )
 
@@ -40,7 +40,7 @@ func runBackupScheduler() {
 	applyConfig := func() *time.Ticker {
 		cfg, err := LoadBackupConfig()
 		if err != nil {
-			log.Printf("backup scheduler: failed to load config: %v", err)
+			slog.Error("backup scheduler: failed to load config", "err", err)
 			return nil
 		}
 		if !cfg.Enabled {
@@ -73,22 +73,22 @@ func runBackupScheduler() {
 // current config. It's a no-op (skips, doesn't crash the loop) if a manual
 // backup is already in progress — backupMu just makes it wait its turn.
 func runScheduledBackup() {
-	log.Printf("backup scheduler: starting scheduled backup")
+	slog.Info("backup scheduler: starting scheduled backup")
 
 	info, err := CreateBackup()
 	if err != nil {
-		log.Printf("backup scheduler: scheduled backup failed: %v", err)
+		slog.Error("backup scheduler: scheduled backup failed", "err", err)
 		return
 	}
-	log.Printf("backup scheduler: created %s (%d bytes)", info.Name, info.Size)
+	slog.Info("backup scheduler: backup created", "backup", info.Name, "bytes", info.Size)
 
 	cfg, err := LoadBackupConfig()
 	if err != nil {
-		log.Printf("backup scheduler: failed to load config for pruning: %v", err)
+		slog.Error("backup scheduler: failed to load config for pruning", "err", err)
 		return
 	}
 
 	if err := PruneBackups(cfg.Keep); err != nil {
-		log.Printf("backup scheduler: pruning failed: %v", err)
+		slog.Error("backup scheduler: pruning failed", "err", err)
 	}
 }

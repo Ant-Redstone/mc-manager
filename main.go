@@ -3,13 +3,13 @@ package main
 //go:generate go run github.com/swaggo/swag/cmd/swag@latest init
 
 import (
-	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -38,14 +38,16 @@ const pprofAddr = "127.0.0.1:6060"
 // @host localhost:8080
 // @BasePath /
 func main() {
+	setupLogging()
+
 	if err := godotenv.Load(); err != nil {
-		log.Println("no .env file found, using system environment")
+		slog.Info("no .env file found, using system environment")
 	}
 
 	go func() {
-		log.Printf("pprof diagnostics listening on %s (container-local only)", pprofAddr)
+		slog.Info("pprof diagnostics listening", "addr", pprofAddr, "scope", "container-local only")
 		if err := http.ListenAndServe(pprofAddr, nil); err != nil {
-			log.Printf("pprof listener failed to start: %v", err)
+			slog.Error("pprof listener failed to start", "err", err)
 		}
 	}()
 
@@ -53,7 +55,7 @@ func main() {
 	db.Init(os.Getenv("DB_PATH"))
 
 	if err := services.EnsureBuiltinRoles(); err != nil {
-		log.Fatalf("failed to seed built-in roles: %v", err)
+		fatal("failed to seed built-in roles", err)
 	}
 	// Assigns roles from ./permissions-seed.json, if present -- see
 	// services/seed.go. Runs every boot; a no-op for anyone already assigned.
@@ -76,10 +78,10 @@ func main() {
 	// here on — the JVM itself runs in a separate container (see
 	// cmd/supervisor), so this is how the API learns what it's doing.
 	if err := services.EnsureDefaultServer(); err != nil {
-		log.Fatalf("failed to seed default server: %v", err)
+		fatal("failed to seed default server", err)
 	}
 	if err := services.LoadRuntimes(); err != nil {
-		log.Fatalf("failed to load server runtimes: %v", err)
+		fatal("failed to load server runtimes", err)
 	}
 
 	// Start the automatic backup scheduler
@@ -278,9 +280,38 @@ var credentialParamRe = regexp.MustCompile(`([?&](?:key|token)=)[^&]*`)
 // logged URL. gin puts the raw query string in LogFormatterParams.Path, which
 // is exactly where those values would otherwise appear.
 func requestLogger() gin.HandlerFunc {
-	return gin.LoggerWithFormatter(func(p gin.LogFormatterParams) string {
-		path := credentialParamRe.ReplaceAllString(p.Path, "${1}REDACTED")
-		return fmt.Sprintf("[GIN] %3d | %13v | %15s | %-7s %s\n",
-			p.StatusCode, p.Latency, p.ClientIP, p.Method, path)
-	})
+	return func(c *gin.Context) {
+		start := time.Now()
+		// Captured before c.Next(): a handler is free to rewrite the URL, and
+		// the line should describe what was asked for, not what it became.
+		uri := c.Request.URL.RequestURI()
+
+		c.Next()
+
+		status := c.Writer.Status()
+
+		// The status picks the level, which is the entire point of the
+		// exercise: `| json | level="ERROR"` in Loki now means "the API is
+		// failing", and 4xx surfacing as WARN is what makes a wave of denials
+		// visible instead of silent. That is not hypothetical -- a service
+		// account left without a role produced exactly that wave today, and
+		// nothing in the logs distinguished it from ordinary traffic.
+		level := slog.LevelInfo
+		switch {
+		case status >= 500:
+			level = slog.LevelError
+		case status >= 400:
+			level = slog.LevelWarn
+		}
+
+		slog.Log(c.Request.Context(), level, "http request",
+			"status", status,
+			"method", c.Request.Method,
+			// Redaction happens here, on the way out, so there is exactly one
+			// place a credential could leak from -- see main_redaction_test.go.
+			"path", credentialParamRe.ReplaceAllString(uri, "${1}REDACTED"),
+			"latency_ms", time.Since(start).Milliseconds(),
+			"ip", c.ClientIP(),
+		)
+	}
 }

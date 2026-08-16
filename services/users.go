@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"time"
 
@@ -20,7 +20,7 @@ func CreateInvitation() (*types.Invitation, error) {
 	tokenBytes := make([]byte, 32)
 
 	if _, err := rand.Read(tokenBytes); err != nil {
-		log.Printf("failed to generate invitation token: %v", err)
+		slog.Error("failed to generate invitation token", "err", err)
 		return nil, err
 	}
 	token := hex.EncodeToString(tokenBytes)
@@ -30,7 +30,7 @@ func CreateInvitation() (*types.Invitation, error) {
 	query := "INSERT INTO invitations (token, expires_at) VALUES (?, ?)"
 	_, err := db.DB.Exec(query, token, expiresAt)
 	if err != nil {
-		log.Printf("failed to insert invitation into database: %v", err)
+		slog.Error("failed to insert invitation into database", "err", err)
 		return nil, err
 	}
 

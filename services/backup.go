@@ -4,7 +4,7 @@ import (
 	"archive/zip"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -88,16 +88,16 @@ func (rt *ServerRuntime) CreateBackup() (types.BackupInfo, error) {
 	running := rt.IsServerRunning()
 	if running {
 		if err := rt.SendCommand("save-off"); err != nil {
-			log.Printf("backup: failed to send save-off: %v", err)
+			slog.Warn("backup: failed to send save-off", "err", err)
 		}
 		if err := rt.SendCommand("save-all flush"); err != nil {
-			log.Printf("backup: failed to send save-all flush: %v", err)
+			slog.Warn("backup: failed to send save-all flush", "err", err)
 		}
 		// Give the server a moment to finish flushing before we start reading files.
 		time.Sleep(2 * time.Second)
 		defer func() {
 			if err := rt.SendCommand("save-on"); err != nil {
-				log.Printf("backup: failed to send save-on: %v", err)
+				slog.Error("backup: failed to send save-on -- world saving may still be disabled", "err", err)
 			}
 		}()
 	}

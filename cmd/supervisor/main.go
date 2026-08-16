@@ -22,7 +22,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -61,16 +61,26 @@ type supervisor struct {
 	done  chan struct{} // closed when the current JVM has fully exited
 }
 
+// fatal logs at ERROR and exits non-zero -- log.Fatalf's behaviour, through
+// the structured handler so a supervisor that refuses to start is as queryable
+// in Loki as anything else it emits.
+func fatal(msg string, args ...any) {
+	slog.Error(msg, args...)
+	os.Exit(1)
+}
+
 func main() {
-	log.SetFlags(0)
-	log.SetPrefix("[mc-supervisor] ")
+	// JSON on stdout, which docker captures and Promtail ships. The "service"
+	// attribute is what separates these lines from the JVM's own output in the
+	// same container log.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "mc-supervisor"))
 
 	if err := os.MkdirAll(controlDir, 0o770); err != nil {
-		log.Fatalf("mkdir %s: %v", controlDir, err)
+		fatal("mkdir control dir", "dir", controlDir, "err", err)
 	}
 	for _, p := range []string{consoleFifo, controlFifo} {
 		if err := ensureFifo(p); err != nil {
-			log.Fatalf("mkfifo %s: %v", p, err)
+			fatal("mkfifo", "path", p, "err", err)
 		}
 	}
 
@@ -93,7 +103,7 @@ func main() {
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		<-sig
-		log.Printf("termination signal received: stopping the JVM gracefully")
+		slog.Info("termination signal received, stopping the JVM gracefully")
 		s.stop()
 		s.writeStatus()
 		os.Exit(0)
@@ -102,9 +112,9 @@ func main() {
 	// Reboot/redeploy recovery: if the server was running when this container
 	// last stopped, bring it back without a human needing to click Start again.
 	if readDesired() == "running" {
-		log.Printf("desired state is \"running\": auto-starting the JVM")
+		slog.Info("desired state is running, auto-starting the JVM")
 		if _, err := s.start(); err != nil {
-			log.Printf("auto-start failed: %v", err)
+			slog.Error("auto-start failed", "err", err)
 		}
 		s.writeStatus()
 	}
@@ -139,7 +149,7 @@ func (s *supervisor) start() (started bool, err error) {
 
 	go func() {
 		waitErr := cmd.Wait()
-		log.Printf("JVM exited: %v", waitErr)
+		slog.Warn("JVM exited", "err", waitErr)
 		s.mu.Lock()
 		s.cmd, s.stdin, s.since = nil, nil, time.Time{}
 		s.mu.Unlock()
@@ -147,7 +157,7 @@ func (s *supervisor) start() (started bool, err error) {
 		s.writeStatus()
 	}()
 
-	log.Printf("JVM started, pid=%d", cmd.Process.Pid)
+	slog.Info("JVM started", "pid", cmd.Process.Pid)
 	return true, nil
 }
 
@@ -167,7 +177,7 @@ func (s *supervisor) stop() {
 	select {
 	case <-done:
 	case <-time.After(stopTimeout):
-		log.Printf("JVM did not stop within %s, killing", stopTimeout)
+		slog.Warn("JVM did not stop in time, killing", "timeout", stopTimeout)
 		cmd.Process.Kill()
 		<-done
 	}
@@ -179,7 +189,7 @@ func (s *supervisor) stop() {
 func (s *supervisor) forwardConsole() {
 	f, err := os.OpenFile(consoleFifo, os.O_RDWR, 0)
 	if err != nil {
-		log.Fatalf("open console fifo: %v", err)
+		fatal("open console fifo", "err", err)
 	}
 	r := bufio.NewReader(f)
 	for {
@@ -206,7 +216,7 @@ func (s *supervisor) forwardConsole() {
 func (s *supervisor) readControl() {
 	f, err := os.OpenFile(controlFifo, os.O_RDWR, 0)
 	if err != nil {
-		log.Fatalf("open control fifo: %v", err)
+		fatal("open control fifo", "err", err)
 	}
 	r := bufio.NewReader(f)
 	for {
@@ -215,7 +225,7 @@ func (s *supervisor) readControl() {
 		case "START":
 			writeDesired("running")
 			if _, e := s.start(); e != nil {
-				log.Printf("start: %v", e)
+				slog.Error("control verb start failed", "err", e)
 			}
 			s.writeStatus()
 		case "STOP":
@@ -226,7 +236,7 @@ func (s *supervisor) readControl() {
 			writeDesired("running")
 			s.stop()
 			if _, e := s.start(); e != nil {
-				log.Printf("restart: %v", e)
+				slog.Error("control verb restart failed", "err", e)
 			}
 			s.writeStatus()
 		case "KILL":
@@ -240,7 +250,7 @@ func (s *supervisor) readControl() {
 		case "":
 			// blank line between commands — ignore
 		default:
-			log.Printf("unknown control verb: %q", strings.TrimSpace(line))
+			slog.Warn("unknown control verb", "verb", strings.TrimSpace(line))
 		}
 		if err != nil {
 			time.Sleep(200 * time.Millisecond)
@@ -258,15 +268,15 @@ func (s *supervisor) writeStatus() {
 
 	b, err := json.Marshal(st)
 	if err != nil {
-		log.Printf("marshal status: %v", err)
+		slog.Error("marshal status", "err", err)
 		return
 	}
 	if err := os.WriteFile(tmpStatus, b, 0o644); err != nil {
-		log.Printf("write status: %v", err)
+		slog.Error("write status", "err", err)
 		return
 	}
 	if err := os.Rename(tmpStatus, statusFile); err != nil {
-		log.Printf("publish status: %v", err)
+		slog.Error("publish status", "err", err)
 	}
 }
 
@@ -294,7 +304,7 @@ func readDesired() string {
 
 func writeDesired(d string) {
 	if err := os.WriteFile(desiredFile, []byte(d), 0o644); err != nil {
-		log.Printf("write desired state: %v", err)
+		slog.Error("write desired state", "err", err)
 	}
 }
 
