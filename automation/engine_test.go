@@ -283,7 +283,7 @@ func TestEngine_ReloadDropsHeldStateWhenTheRuleChanges(t *testing.T) {
 
 	r := sampleRule()
 	r.TriggerKind = "tps"
-	r.TriggerConfig = map[string]any{"below": 15.0, "held_for_seconds": 300.0}
+	r.TriggerConfig = map[string]any{"below": 15.0, "for_seconds": 300.0}
 	r.Actions = []Action{{Type: "backup"}}
 	r.CooldownSeconds = 0
 	r.DeafWindowSeconds = 0
@@ -306,12 +306,14 @@ func TestEngine_ReloadDropsHeldStateWhenTheRuleChanges(t *testing.T) {
 		t.Fatalf("held_for 300s fired on the first bad sample: %d backups", run.backups)
 	}
 
-	// Four minutes in, the operator repurposes the rule: same row, completely
-	// different trigger.
-	base = base.Add(4 * time.Minute)
+	// Six minutes in -- past the five-minute window -- the operator repurposes
+	// the rule: same row, completely different trigger. The elapsed time has to
+	// exceed the window, or the inherited clock is not yet old enough to do any
+	// damage and the test would pass without the fix.
+	base = base.Add(6 * time.Minute)
 	r.ID = id
 	r.TriggerKind = "count"
-	r.TriggerConfig = map[string]any{"above": 20.0, "held_for_seconds": 300.0}
+	r.TriggerConfig = map[string]any{"above": 20.0, "for_seconds": 300.0}
 	if err := UpdateRule(r); err != nil {
 		t.Fatalf("UpdateRule: %v", err)
 	}
@@ -320,7 +322,7 @@ func TestEngine_ReloadDropsHeldStateWhenTheRuleChanges(t *testing.T) {
 	}
 
 	// The player count crosses for the FIRST time right now, so the new
-	// condition has been held for zero seconds, not four minutes.
+	// condition has been held for zero seconds, not six minutes.
 	e.HandleEvent(types.SampleEvent{ServerID: "default", Kind: types.SamplePlayerCount, Value: 25, At: base})
 	e.waitIdle()
 
@@ -383,7 +385,7 @@ func TestEngine_ReloadKeepsStateOfARuleThatDidNotChange(t *testing.T) {
 
 	watched := sampleRule()
 	watched.TriggerKind = "tps"
-	watched.TriggerConfig = map[string]any{"below": 15.0, "held_for_seconds": 300.0}
+	watched.TriggerConfig = map[string]any{"below": 15.0, "for_seconds": 300.0}
 	watched.Actions = []Action{{Type: "backup"}}
 	watched.CooldownSeconds = 0
 	watched.DeafWindowSeconds = 0
