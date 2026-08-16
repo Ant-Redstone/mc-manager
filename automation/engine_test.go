@@ -272,3 +272,152 @@ func TestEngine_StartAndStopCleanly(t *testing.T) {
 		t.Error("expected the engine to unsubscribe on Stop")
 	}
 }
+
+// A reload happens on every write, and the engine's per-rule state is keyed by
+// rule ID -- so state from before a write can be read after it. This is only
+// reachable now that rules can change at runtime: before the REST layer, rules
+// only ever loaded once at boot.
+func TestEngine_ReloadDropsHeldStateWhenTheRuleChanges(t *testing.T) {
+	setupTestDB(t)
+	run := &fakeRunner{running: true}
+
+	r := sampleRule()
+	r.TriggerKind = "tps"
+	r.TriggerConfig = map[string]any{"below": 15.0, "held_for_seconds": 300.0}
+	r.Actions = []Action{{Type: "backup"}}
+	r.CooldownSeconds = 0
+	r.DeafWindowSeconds = 0
+	id, err := CreateRule(r)
+	if err != nil {
+		t.Fatalf("CreateRule: %v", err)
+	}
+
+	e := newTestEngine(run)
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return base }
+	if err := e.ReloadRules(); err != nil {
+		t.Fatalf("ReloadRules: %v", err)
+	}
+
+	// TPS goes bad. held_for says nothing happens until it stays bad 5 minutes.
+	e.HandleEvent(types.SampleEvent{ServerID: "default", Kind: types.SampleTPS, Value: 10, At: base})
+	e.waitIdle()
+	if run.backups != 0 {
+		t.Fatalf("held_for 300s fired on the first bad sample: %d backups", run.backups)
+	}
+
+	// Four minutes in, the operator repurposes the rule: same row, completely
+	// different trigger.
+	base = base.Add(4 * time.Minute)
+	r.ID = id
+	r.TriggerKind = "count"
+	r.TriggerConfig = map[string]any{"above": 20.0, "held_for_seconds": 300.0}
+	if err := UpdateRule(r); err != nil {
+		t.Fatalf("UpdateRule: %v", err)
+	}
+	if err := e.ReloadRules(); err != nil {
+		t.Fatalf("ReloadRules: %v", err)
+	}
+
+	// The player count crosses for the FIRST time right now, so the new
+	// condition has been held for zero seconds, not four minutes.
+	e.HandleEvent(types.SampleEvent{ServerID: "default", Kind: types.SamplePlayerCount, Value: 25, At: base})
+	e.waitIdle()
+
+	if run.backups != 0 {
+		t.Errorf("the new condition inherited the old trigger's 4-minute-old clock and fired immediately")
+	}
+}
+
+// Turning a rule off and back on must not leave it silently deaf from a firing
+// that happened before it was turned off.
+func TestEngine_ReloadDropsStateOfADisabledRule(t *testing.T) {
+	setupTestDB(t)
+	run := &fakeRunner{running: true}
+
+	r := consoleRuleFor("morreu", Action{Type: "command", Command: "say f"})
+	r.DeafWindowSeconds = 600 // long, and customisable by design
+	id, err := CreateRule(r)
+	if err != nil {
+		t.Fatalf("CreateRule: %v", err)
+	}
+
+	e := newTestEngine(run)
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return base }
+	if err := e.ReloadRules(); err != nil {
+		t.Fatalf("ReloadRules: %v", err)
+	}
+
+	// Fire it, arming a ten-minute deaf window.
+	e.HandleEvent(types.ConsoleLineEvent{ServerID: "default", Line: "o gato morreu", At: base})
+	e.waitIdle()
+	if len(run.commands) != 1 {
+		t.Fatalf("expected the rule to fire, got %d commands", len(run.commands))
+	}
+
+	for _, enabled := range []bool{false, true} {
+		if err := SetRuleEnabled(id, enabled); err != nil {
+			t.Fatalf("SetRuleEnabled(%v): %v", enabled, err)
+		}
+		if err := e.ReloadRules(); err != nil {
+			t.Fatalf("ReloadRules: %v", err)
+		}
+	}
+
+	base = base.Add(time.Second)
+	e.HandleEvent(types.ConsoleLineEvent{ServerID: "default", Line: "o cachorro morreu", At: base})
+	e.waitIdle()
+
+	if len(run.commands) != 2 {
+		t.Errorf("the rule came back still deaf from before it was disabled: commands=%v", run.commands)
+	}
+}
+
+// The precision half. Dropping state for every rule on every reload would be
+// simpler and wrong: editing one rule would silently restart another rule's
+// five-minute held-for clock, and nothing would ever say why it took ten.
+func TestEngine_ReloadKeepsStateOfARuleThatDidNotChange(t *testing.T) {
+	setupTestDB(t)
+	run := &fakeRunner{running: true}
+
+	watched := sampleRule()
+	watched.TriggerKind = "tps"
+	watched.TriggerConfig = map[string]any{"below": 15.0, "held_for_seconds": 300.0}
+	watched.Actions = []Action{{Type: "backup"}}
+	watched.CooldownSeconds = 0
+	watched.DeafWindowSeconds = 0
+	if _, err := CreateRule(watched); err != nil {
+		t.Fatalf("CreateRule: %v", err)
+	}
+
+	e := newTestEngine(run)
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return base }
+	if err := e.ReloadRules(); err != nil {
+		t.Fatalf("ReloadRules: %v", err)
+	}
+
+	// The TPS condition starts being held.
+	e.HandleEvent(types.SampleEvent{ServerID: "default", Kind: types.SampleTPS, Value: 10, At: base})
+	e.waitIdle()
+
+	// Someone creates an unrelated rule four minutes later, which reloads.
+	base = base.Add(4 * time.Minute)
+	if _, err := CreateRule(consoleRuleFor("outra coisa", Action{Type: "command", Command: "say x"})); err != nil {
+		t.Fatalf("CreateRule: %v", err)
+	}
+	if err := e.ReloadRules(); err != nil {
+		t.Fatalf("ReloadRules: %v", err)
+	}
+
+	// A minute later the TPS rule has genuinely held its condition for five
+	// minutes and must fire.
+	base = base.Add(time.Minute + time.Second)
+	e.HandleEvent(types.SampleEvent{ServerID: "default", Kind: types.SampleTPS, Value: 10, At: base})
+	e.waitIdle()
+
+	if run.backups != 1 {
+		t.Errorf("an unrelated rule's creation restarted this rule's held-for clock: backups=%d", run.backups)
+	}
+}

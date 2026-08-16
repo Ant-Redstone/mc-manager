@@ -419,6 +419,12 @@ func TestAutomationRoutes_ManageCanWriteEndToEnd(t *testing.T) {
 	}
 	id := strconv.Itoa(rules[0].ID)
 
+	// Who created a rule is the only audit trail this table has, and it comes
+	// from the JWT claim -- a shape that fails by being silently nil.
+	if rules[0].CreatedBy == nil {
+		t.Error("the rule was stored with no author")
+	}
+
 	if w := doWrite(r, http.MethodPost, "/api/automations/"+id+"/enabled", token, `{"enabled":false}`); w.Code != http.StatusOK {
 		t.Errorf("disable: got %d: %s", w.Code, w.Body.String())
 	}
@@ -427,5 +433,56 @@ func TestAutomationRoutes_ManageCanWriteEndToEnd(t *testing.T) {
 	}
 	if rules, _ := automation.ListRules(); len(rules) != 0 {
 		t.Errorf("the rule survived the delete: %+v", rules)
+	}
+}
+
+// The one link nothing else covers: that a rule saved through the API reaches
+// the running engine. Every other test proves half of it -- the handler calls
+// its reloader, the engine reloads correctly -- and a missing
+// SetEngineReloader would pass both while the feature did nothing until the
+// next deploy.
+func TestAutomations_ARuleSavedThroughTheAPIFiresWithoutARestart(t *testing.T) {
+	setupTestDB(t)
+	setupServerDir(t)
+	bootTestRegistry(t)
+	t.Setenv("JWT_SECRET", "test-secret")
+	if err := services.EnsureBuiltinRoles(); err != nil {
+		t.Fatalf("failed to seed roles: %v", err)
+	}
+	token := newTestUserToken(t, "owner", "Owner")
+
+	engine, stop := startAutomations()
+	t.Cleanup(stop)
+	r := newRouter()
+
+	// Nothing configured: the engine is asleep and asks for no samples.
+	if engine.NeedsSampling(types.SampleTPS) {
+		t.Error("an engine with no rules must not ask for TPS samples")
+	}
+
+	body := `{"server_id":"default","name":"reinicia com tps baixo","trigger_kind":"tps",
+	          "trigger_config":{"below":5,"held_for_seconds":300},
+	          "actions":[{"type":"backup"}]}`
+	if w := doWrite(r, http.MethodPost, "/api/automations", token, body); w.Code != http.StatusCreated {
+		t.Fatalf("create: got %d: %s", w.Code, w.Body.String())
+	}
+
+	// The engine learned about it from the write alone -- no restart, no boot.
+	if !engine.NeedsSampling(types.SampleTPS) {
+		t.Fatal("the engine did not pick up a rule saved through the API")
+	}
+
+	rules, _ := automation.ListRules()
+	if len(rules) != 1 {
+		t.Fatalf("expected one rule, got %d", len(rules))
+	}
+	id := strconv.Itoa(rules[0].ID)
+
+	if w := doWrite(r, http.MethodPost, "/api/automations/"+id+"/enabled", token, `{"enabled":false}`); w.Code != http.StatusOK {
+		t.Fatalf("disable: got %d: %s", w.Code, w.Body.String())
+	}
+	// And it stops measuring the moment the last rule that needed it is off.
+	if engine.NeedsSampling(types.SampleTPS) {
+		t.Error("the engine kept sampling for a rule that was disabled through the API")
 	}
 }

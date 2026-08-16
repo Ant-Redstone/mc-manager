@@ -88,10 +88,35 @@ func main() {
 	// Start the automatic backup scheduler
 	services.StartBackupScheduler()
 
-	// Automations. Safe to start unconditionally: with no rules configured the
-	// engine returns immediately from every event and the sampler measures
-	// nothing, so the server behaves byte for byte as it did before this
-	// shipped until someone creates a first rule.
+	startAutomations()
+
+	// Default to release mode (quieter, no debug overhead); set GIN_MODE=debug
+	// locally to get gin's verbose per-request logging during development.
+	if mode := os.Getenv("GIN_MODE"); mode != "" {
+		gin.SetMode(mode)
+	} else {
+		gin.SetMode(gin.ReleaseMode)
+	}
+
+	r := newRouter()
+	r.Run()
+}
+
+// startAutomations boots the rule engine and connects it to the API. Split out
+// of main() for the same reason newRouter() is: main() cannot be called from a
+// test, and the one line that matters most here -- SetEngineReloader -- is
+// invisible to every other test in the suite. Without it a saved rule would sit
+// in the database doing nothing until the next deploy, which reads as a broken
+// feature rather than a stale cache, and nothing would fail to say so.
+//
+// Safe to start unconditionally: with no rules configured the engine returns
+// immediately from every event and the sampler measures nothing, so the server
+// behaves byte for byte as it did before automations shipped until someone
+// creates a first rule.
+//
+// Returns a stop func; main ignores it (the process exit is the stop) and tests
+// use it to shut the goroutines down.
+func startAutomations() (*automation.Engine, func()) {
 	engine := automation.NewEngine(types.Bus, func(serverID string) (automation.ActionRunner, error) {
 		rt, err := services.RuntimeForID(serverID)
 		if err != nil {
@@ -104,24 +129,17 @@ func main() {
 		slog.Error("automations: failed to load rules", "err", err)
 	}
 	engine.Start()
-	services.StartSampler(engine.NeedsSampling, engine.TightestSampleWindow)
+	stopSampler := services.StartSampler(engine.NeedsSampling, engine.TightestSampleWindow)
 
 	// The engine holds its rules in memory, so a write through the API has to
-	// tell it to re-read them. Without this line every edit would silently need
-	// a restart to take effect -- and a rule that does nothing after you saved
-	// it reads as a broken feature, not as a stale cache.
+	// tell it to re-read them.
 	handlers.SetEngineReloader(engine.ReloadRules)
 
-	// Default to release mode (quieter, no debug overhead); set GIN_MODE=debug
-	// locally to get gin's verbose per-request logging during development.
-	if mode := os.Getenv("GIN_MODE"); mode != "" {
-		gin.SetMode(mode)
-	} else {
-		gin.SetMode(gin.ReleaseMode)
+	return engine, func() {
+		stopSampler()
+		engine.Stop()
+		handlers.SetEngineReloader(nil)
 	}
-
-	r := newRouter()
-	r.Run()
 }
 
 // newRouter builds the full route table -- CORS, the rate limiter, auth
