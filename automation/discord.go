@@ -111,15 +111,33 @@ func redactURL(text, raw string) string {
 		return text
 	}
 	text = strings.ReplaceAll(text, raw, "[destino]")
-	if u, err := neturl.Parse(raw); err == nil && u.Path != "" && u.Path != "/" {
-		text = strings.ReplaceAll(text, u.Path, "[destino]")
-		// The token on its own, which is the half that matters.
-		if i := strings.LastIndex(u.Path, "/"); i >= 0 && i+1 < len(u.Path) {
-			text = strings.ReplaceAll(text, u.Path[i+1:], "[destino]")
+	u, err := neturl.Parse(raw)
+	if err != nil || u.Path == "" || u.Path == "/" {
+		return text
+	}
+	text = strings.ReplaceAll(text, u.Path, "[destino]")
+
+	// The token on its own, which is the half that matters -- but only when it
+	// is long enough to actually be one. This is a loose substring match, and a
+	// short segment is a substring of ordinary words: the URL validator has no
+	// minimum length ([\w-]+), so a token of "a" would turn "Cannot POST, and
+	// the account is inactive" into "C[destino]nnot POST, [destino]nd the
+	// [destino]ccount is in[destino]ctive" and destroy the sentence the admin
+	// is trying to read. Anything that short is not a credential worth the
+	// damage, and the full-path replacement above already covers it in the one
+	// place it appears.
+	if i := strings.LastIndex(u.Path, "/"); i >= 0 {
+		if token := u.Path[i+1:]; len(token) >= minTokenLen {
+			text = strings.ReplaceAll(text, token, "[destino]")
 		}
 	}
 	return text
 }
+
+// minTokenLen is where a path segment stops being a word and starts being a
+// secret. Discord's webhook tokens are 60+ characters; this is far below that
+// and far above anything that collides with prose.
+const minTokenLen = 12
 
 func explain(body []byte) string {
 	var d struct {

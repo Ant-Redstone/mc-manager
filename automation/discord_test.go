@@ -233,3 +233,33 @@ func TestDiscord_ARefusalBodyEchoingOnlyThePathIsRedacted(t *testing.T) {
 		t.Errorf("a refusal body carried the token into the error: %q", err)
 	}
 }
+
+// redactURL replaces the last path segment as loose text, and a short segment
+// is a substring of ordinary words. The URL validator accepts a one-character
+// token ([\w-]+ has no minimum), so this is reachable, and the damage lands on
+// the sentence the admin is trying to read.
+func TestRedactURL_DoesNotMangleTheMessageForAShortToken(t *testing.T) {
+	got := redactURL("Cannot POST, and the account is inactive", "https://discord.com/api/webhooks/1/a")
+	if strings.Contains(got, "[destino]") {
+		t.Errorf("a one-character token ate letters out of the message: %q", got)
+	}
+	if got != "Cannot POST, and the account is inactive" {
+		t.Errorf("the message was altered: %q", got)
+	}
+}
+
+// The real thing still has to go. Discord's tokens are long, which is exactly
+// what makes them safe to match as loose text.
+func TestRedactURL_StillRemovesARealToken(t *testing.T) {
+	const url = "https://discord.com/api/webhooks/123456789/abcdefGHIJK-lmnop_123"
+	for _, body := range []string{
+		"Cannot POST " + url,
+		"no route for /api/webhooks/123456789/abcdefGHIJK-lmnop_123",
+		"unknown token abcdefGHIJK-lmnop_123",
+	} {
+		got := redactURL(body, url)
+		if strings.Contains(got, "abcdefGHIJK-lmnop_123") {
+			t.Errorf("the token survived redaction in %q -> %q", body, got)
+		}
+	}
+}
