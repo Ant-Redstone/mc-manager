@@ -1,0 +1,238 @@
+package automation
+
+import (
+	"testing"
+	"time"
+
+	"github.com/lomokwa/mc-manager/types"
+)
+
+func at(s string) time.Time {
+	ts, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		panic(err)
+	}
+	return ts
+}
+
+func freshState(now time.Time) MatchState {
+	return MatchState{
+		Now:               now,
+		ConditionSince:    map[int]time.Time{},
+		DeafUntil:         map[int]time.Time{},
+		FiringsThisMinute: map[int]int{},
+		InFlight:          map[int]bool{},
+		KnownPlayers:      map[string]bool{},
+	}
+}
+
+func consoleRule(pattern string) Rule {
+	return Rule{
+		ID: 1, ServerID: "default", Enabled: true,
+		TriggerKind:   "console",
+		TriggerConfig: map[string]any{"pattern": pattern},
+		Actions:       []Action{{Type: "discord", WebhookID: 1, Message: "x"}},
+	}
+}
+
+// Plain text is a literal substring search -- the UI promises "texto simples =
+// busca literal", so a pattern containing regex punctuation must not silently
+// behave like a pattern. "Can't keep up!" is the everyday example.
+func TestMatch_ConsolePlainTextIsLiteral(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+
+	d := Evaluate(consoleRule("Can't keep up"), types.ConsoleLineEvent{
+		ServerID: "default",
+		Line:     "[12:00:00] [Server thread/WARN]: Can't keep up! Running 2140ms behind",
+		At:       now,
+	}, freshState(now))
+	if !d.Fire {
+		t.Errorf("expected a literal match to fire, got %q", d.Reason)
+	}
+
+	if d := Evaluate(consoleRule("a.c"), types.ConsoleLineEvent{
+		ServerID: "default", Line: "abc", At: now,
+	}, freshState(now)); d.Fire {
+		t.Error(`"a.c" as plain text must not match "abc" -- that is regex behaviour`)
+	}
+}
+
+func TestMatch_ConsoleSlashDelimitedIsRegex(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+	d := Evaluate(consoleRule("/joined the game$/"), types.ConsoleLineEvent{
+		ServerID: "default", Line: "Notch joined the game", At: now,
+	}, freshState(now))
+	if !d.Fire {
+		t.Errorf("expected the regex to fire, got %q", d.Reason)
+	}
+}
+
+// An unparseable pattern must not take the engine down, and must not silently
+// match everything either -- the failure mode of "matches everything" on a
+// rule that runs console commands is not one to discover in production.
+func TestMatch_BrokenRegexNeverFires(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+	d := Evaluate(consoleRule("/[unclosed/"), types.ConsoleLineEvent{
+		ServerID: "default", Line: "anything", At: now,
+	}, freshState(now))
+	if d.Fire {
+		t.Error("a rule with an invalid pattern must not fire")
+	}
+}
+
+// The rule picked a server. Another server's console must never reach it.
+func TestMatch_WrongServerNeverFires(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+	d := Evaluate(consoleRule("hello"), types.ConsoleLineEvent{
+		ServerID: "creative", Line: "hello", At: now,
+	}, freshState(now))
+	if d.Fire {
+		t.Error("a rule bound to 'default' fired on 'creative'")
+	}
+}
+
+func TestMatch_LifecycleAndBackupTriggers(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+
+	stopRule := Rule{ID: 1, ServerID: "default", Enabled: true, TriggerKind: "stop"}
+	if d := Evaluate(stopRule, types.ServerLifecycleEvent{
+		ServerID: "default", Started: false, Expected: false, At: now,
+	}, freshState(now)); !d.Fire {
+		t.Error("expected an unexpected stop to fire the stop trigger")
+	}
+	// The trigger is "server stops UNEXPECTEDLY" -- a stop the panel asked for
+	// is not news, and paging someone for it would train them to ignore it.
+	if d := Evaluate(stopRule, types.ServerLifecycleEvent{
+		ServerID: "default", Started: false, Expected: true, At: now,
+	}, freshState(now)); d.Fire {
+		t.Error("an expected stop must not fire the unexpected-stop trigger")
+	}
+
+	startRule := Rule{ID: 2, ServerID: "default", Enabled: true, TriggerKind: "start"}
+	if d := Evaluate(startRule, types.ServerLifecycleEvent{
+		ServerID: "default", Started: true, At: now,
+	}, freshState(now)); !d.Fire {
+		t.Error("expected a start to fire the start trigger")
+	}
+
+	failRule := Rule{ID: 3, ServerID: "default", Enabled: true, TriggerKind: "backup-fail"}
+	if d := Evaluate(failRule, types.BackupEvent{
+		ServerID: "default", Failed: true, Err: "disk full", At: now,
+	}, freshState(now)); !d.Fire {
+		t.Error("expected a failed backup to fire backup-fail")
+	}
+	if d := Evaluate(failRule, types.BackupEvent{
+		ServerID: "default", Failed: false, Name: "world-x.zip", At: now,
+	}, freshState(now)); d.Fire {
+		t.Error("a successful backup must not fire backup-fail")
+	}
+
+	okRule := Rule{ID: 4, ServerID: "default", Enabled: true, TriggerKind: "backup-ok"}
+	if d := Evaluate(okRule, types.BackupEvent{
+		ServerID: "default", Failed: false, Name: "world-x.zip", At: now,
+	}, freshState(now)); !d.Fire {
+		t.Error("expected a successful backup to fire backup-ok")
+	}
+}
+
+// "TPS below 15 for at least 5 minutes" -- the duration is the whole point.
+// A single dip is not an incident, and alerting on one is how an alert becomes
+// noise nobody reads.
+func TestMatch_ThresholdRequiresTheFullDuration(t *testing.T) {
+	start := at("2026-08-16T12:00:00Z")
+	r := Rule{
+		ID: 1, ServerID: "default", Enabled: true, TriggerKind: "tps",
+		TriggerConfig: map[string]any{"below": 15.0, "for_seconds": 300.0},
+	}
+	st := freshState(start)
+
+	if d := Evaluate(r, types.SampleEvent{
+		ServerID: "default", Kind: types.SampleTPS, Value: 12, At: start,
+	}, st); d.Fire {
+		t.Error("must not fire on the first sample below the threshold")
+	}
+
+	st.Now = start.Add(4 * time.Minute)
+	if d := Evaluate(r, types.SampleEvent{
+		ServerID: "default", Kind: types.SampleTPS, Value: 12, At: st.Now,
+	}, st); d.Fire {
+		t.Error("must not fire before the window elapses")
+	}
+
+	st.Now = start.Add(5*time.Minute + time.Second)
+	if d := Evaluate(r, types.SampleEvent{
+		ServerID: "default", Kind: types.SampleTPS, Value: 12, At: st.Now,
+	}, st); !d.Fire {
+		t.Error("expected it to fire once the window elapsed")
+	}
+}
+
+// Recovering resets the clock: TPS back above the threshold means the next dip
+// starts counting from zero, not from the first one.
+func TestMatch_ThresholdResetsWhenTheConditionClears(t *testing.T) {
+	start := at("2026-08-16T12:00:00Z")
+	r := Rule{
+		ID: 1, ServerID: "default", Enabled: true, TriggerKind: "tps",
+		TriggerConfig: map[string]any{"below": 15.0, "for_seconds": 300.0},
+	}
+	st := freshState(start)
+
+	Evaluate(r, types.SampleEvent{ServerID: "default", Kind: types.SampleTPS, Value: 12, At: start}, st)
+
+	st.Now = start.Add(time.Minute)
+	Evaluate(r, types.SampleEvent{ServerID: "default", Kind: types.SampleTPS, Value: 20, At: st.Now}, st)
+
+	st.Now = start.Add(6 * time.Minute)
+	if d := Evaluate(r, types.SampleEvent{
+		ServerID: "default", Kind: types.SampleTPS, Value: 12, At: st.Now,
+	}, st); d.Fire {
+		t.Error("the window must restart after the condition cleared")
+	}
+}
+
+// Player count and disk cross UPWARDS. Sharing thresholdHeld with TPS is only
+// safe if the direction is actually honoured.
+func TestMatch_AboveThresholdsCrossTheOtherWay(t *testing.T) {
+	start := at("2026-08-16T12:00:00Z")
+	r := Rule{
+		ID: 1, ServerID: "default", Enabled: true, TriggerKind: "count",
+		TriggerConfig: map[string]any{"above": 20.0, "for_seconds": 60.0},
+	}
+	st := freshState(start)
+
+	Evaluate(r, types.SampleEvent{ServerID: "default", Kind: types.SamplePlayerCount, Value: 25, At: start}, st)
+	st.Now = start.Add(61 * time.Second)
+	if d := Evaluate(r, types.SampleEvent{
+		ServerID: "default", Kind: types.SamplePlayerCount, Value: 25, At: st.Now,
+	}, st); !d.Fire {
+		t.Error("expected a count above the threshold to fire once the window elapsed")
+	}
+
+	// Below the threshold must not fire, which is the bug a shared helper
+	// invites if it only ever compares one way.
+	st2 := freshState(start)
+	Evaluate(r, types.SampleEvent{ServerID: "default", Kind: types.SamplePlayerCount, Value: 3, At: start}, st2)
+	st2.Now = start.Add(61 * time.Second)
+	if d := Evaluate(r, types.SampleEvent{
+		ServerID: "default", Kind: types.SamplePlayerCount, Value: 3, At: st2.Now,
+	}, st2); d.Fire {
+		t.Error("a count BELOW an 'above' threshold must not fire")
+	}
+}
+
+// A sample of the wrong kind must not satisfy a rule -- disk usage of 12 must
+// never be read as a TPS of 12.
+func TestMatch_SampleKindMustAgreeWithTheTrigger(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+	r := Rule{
+		ID: 1, ServerID: "default", Enabled: true, TriggerKind: "tps",
+		TriggerConfig: map[string]any{"below": 15.0, "for_seconds": 0.0},
+	}
+	st := freshState(now)
+
+	if d := Evaluate(r, types.SampleEvent{
+		ServerID: "default", Kind: types.SampleDiskPercent, Value: 12, At: now,
+	}, st); d.Fire {
+		t.Error("a disk sample fired a TPS rule")
+	}
+}
