@@ -1,6 +1,7 @@
 package automation
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -351,5 +352,144 @@ func TestSchedule_GarbageConfigNeverFires(t *testing.T) {
 		if dueBySchedule(cfg, nil, now) {
 			t.Errorf("an unusable schedule config must never be due: %v", cfg)
 		}
+	}
+}
+
+func TestGuard_CooldownBlocksThenExpires(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+	fired := now.Add(-30 * time.Second)
+	r := consoleRule("boom")
+	r.CooldownSeconds = 60
+	r.LastFiredAt = &fired
+
+	d := Evaluate(r, types.ConsoleLineEvent{ServerID: "default", Line: "boom", At: now}, freshState(now))
+	if d.Fire {
+		t.Error("expected the cooldown to block")
+	}
+	// The reason reaches the UI. "cooling down for another 30s" is the
+	// difference between a user understanding their rule and filing a bug.
+	if !strings.Contains(d.Reason, "cooling down") {
+		t.Errorf("expected the refusal to name the cooldown, got %q", d.Reason)
+	}
+
+	later := now.Add(40 * time.Second)
+	if d := Evaluate(r, types.ConsoleLineEvent{
+		ServerID: "default", Line: "boom", At: later,
+	}, freshState(later)); !d.Fire {
+		t.Error("expected it to fire once the cooldown expired")
+	}
+}
+
+// The loop this closes: a rule runs a console command, the command prints to
+// the console, that line matches the same pattern, and it fires again. On a
+// live server, forever.
+func TestGuard_DeafWindowSilencesTheRulesOwnEcho(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+	r := consoleRule("Saved the game")
+	st := freshState(now)
+	st.DeafUntil[r.ID] = now.Add(5 * time.Second)
+
+	if d := Evaluate(r, types.ConsoleLineEvent{
+		ServerID: "default", Line: "Saved the game", At: now,
+	}, st); d.Fire {
+		t.Errorf("expected the deaf window to block, got fire (reason %q)", d.Reason)
+	}
+
+	st.Now = now.Add(6 * time.Second)
+	if d := Evaluate(r, types.ConsoleLineEvent{
+		ServerID: "default", Line: "Saved the game", At: st.Now,
+	}, st); !d.Fire {
+		t.Error("expected it to hear again once the deaf window passed")
+	}
+}
+
+// Deafness is about a rule hearing ITSELF. A scheduled tick or a backup
+// result is never an echo, so silencing one would be a different bug wearing
+// the same clothes.
+func TestGuard_DeafWindowOnlySilencesConsole(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+	st := freshState(now)
+
+	backup := Rule{ID: 1, ServerID: "default", Enabled: true, TriggerKind: "backup-fail"}
+	st.DeafUntil[backup.ID] = now.Add(time.Minute)
+	if d := Evaluate(backup, types.BackupEvent{
+		ServerID: "default", Failed: true, Err: "disk full", At: now,
+	}, st); !d.Fire {
+		t.Errorf("a backup event must not be silenced by the deaf window: %q", d.Reason)
+	}
+
+	sched := Rule{ID: 2, ServerID: "default", Enabled: true, TriggerKind: "sched",
+		TriggerConfig: map[string]any{"mode": "every", "hours": 1.0}}
+	st.DeafUntil[sched.ID] = now.Add(time.Minute)
+	if d := Evaluate(sched, types.ScheduleTick{At: now}, st); !d.Fire {
+		t.Errorf("a schedule tick must not be silenced by the deaf window: %q", d.Reason)
+	}
+}
+
+func TestGuard_FiringCapStopsARunaway(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+	r := consoleRule("spam")
+	st := freshState(now)
+	st.FiringsThisMinute[r.ID] = maxFiringsPerMinute
+
+	d := Evaluate(r, types.ConsoleLineEvent{ServerID: "default", Line: "spam", At: now}, st)
+	if d.Fire {
+		t.Error("expected the firing cap to stop a runaway rule")
+	}
+	if d.Reason == "" {
+		t.Error("a blocked decision must say why -- that reason reaches the UI")
+	}
+
+	// One below the cap still fires: the guard must not be off-by-one and
+	// silently cost the user their last allowed firing.
+	st.FiringsThisMinute[r.ID] = maxFiringsPerMinute - 1
+	if d := Evaluate(r, types.ConsoleLineEvent{
+		ServerID: "default", Line: "spam", At: now,
+	}, st); !d.Fire {
+		t.Error("expected the last firing under the cap to be allowed")
+	}
+}
+
+// Restart-with-warnings makes one firing last minutes. A second firing
+// starting mid-sequence would make the warnings a lie.
+func TestGuard_OneFiringPerRuleAtATime(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+	r := consoleRule("go")
+	st := freshState(now)
+	st.InFlight[r.ID] = true
+
+	if d := Evaluate(r, types.ConsoleLineEvent{
+		ServerID: "default", Line: "go", At: now,
+	}, st); d.Fire {
+		t.Error("expected an in-flight firing to block a second one")
+	}
+}
+
+func TestGuard_DisabledRuleNeverFires(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+	r := consoleRule("anything")
+	r.Enabled = false
+
+	if d := Evaluate(r, types.ConsoleLineEvent{
+		ServerID: "default", Line: "anything", At: now,
+	}, freshState(now)); d.Fire {
+		t.Error("a disabled rule fired")
+	}
+}
+
+// A cooldown of zero means "no cooldown", not "block forever". Getting this
+// backwards would make every rule created with the UI default fire once and
+// never again.
+func TestGuard_ZeroCooldownDoesNotBlock(t *testing.T) {
+	now := at("2026-08-16T12:00:00Z")
+	justFired := now.Add(-time.Millisecond)
+	r := consoleRule("again")
+	r.CooldownSeconds = 0
+	r.LastFiredAt = &justFired
+
+	if d := Evaluate(r, types.ConsoleLineEvent{
+		ServerID: "default", Line: "again", At: now,
+	}, freshState(now)); !d.Fire {
+		t.Errorf("a zero cooldown must not block, got %q", d.Reason)
 	}
 }
