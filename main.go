@@ -112,6 +112,11 @@ func newRouter() *gin.Engine {
 	// from the logged URL. Recovery is kept exactly as before.
 	r := gin.New()
 	r.Use(requestLogger(), gin.Recovery())
+	// After Recovery so a panicking handler still yields a row, and before
+	// the route groups so it sees every mutation regardless of which group
+	// served it. It only records state-changing requests -- see
+	// middleware.RecordActivity for why GETs are excluded.
+	r.Use(middleware.RecordActivity())
 
 	// Cors config
 	r.Use(cors.New(cors.Config{
@@ -156,6 +161,11 @@ func newRouter() *gin.Engine {
 	api.PUT("/backups/config", perm(types.PermBackupsCreate), handlers.UpdateBackupConfigHandler)
 
 	api.GET("/me", handlers.GetMeHandler)
+
+	// Audit trail. Gated on its own permission because it exposes who did
+	// what -- more than a Viewer should see, which is why activity.view is
+	// not on the Viewer or Operator roles.
+	api.GET("/activity", perm(types.PermActivityView), handlers.ListActivityHandler)
 
 	// Permissions & roles
 	api.GET("/permissions/schema", handlers.PermissionSchemaHandler)
