@@ -307,3 +307,99 @@ func TestUpdateAutomation_PreservesTheCooldownState(t *testing.T) {
 		t.Error("editing a rule cleared last_fired_at, which resets its cooldown")
 	}
 }
+
+func TestDeleteAutomation_RemovesTheRuleAndItsFirings(t *testing.T) {
+	setupTestDB(t)
+	seedDefaultServer(t)
+	id := newRule(t, "descartavel")
+	if err := automation.RecordFiring(automation.Firing{RuleID: id, Trigger: "t", Outcome: "[]"}); err != nil {
+		t.Fatalf("RecordFiring: %v", err)
+	}
+
+	reloaded := 0
+	SetEngineReloader(func() error { reloaded++; return nil })
+	t.Cleanup(func() { SetEngineReloader(nil) })
+
+	w := call(DeleteAutomationHandler, http.MethodDelete, "/api/automations/1", "",
+		gin.Params{{Key: "id", Value: strconv.Itoa(id)}})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	rules, _ := automation.ListRules()
+	if len(rules) != 0 {
+		t.Errorf("the rule survived the delete: %+v", rules)
+	}
+	// The schema says ON DELETE CASCADE but SQLite has foreign keys OFF, so
+	// without the explicit transaction in DeleteRule the firings would outlive
+	// the rule and leak into the next rule that reuses the id.
+	firings, _ := automation.ListFirings(id, 10)
+	if len(firings) != 0 {
+		t.Errorf("orphan firings survived the delete: %+v", firings)
+	}
+	if reloaded != 1 {
+		t.Errorf("a deleted rule must stop firing immediately, reloads = %d", reloaded)
+	}
+}
+
+func TestDeleteAutomation_404sForAnUnknownRule(t *testing.T) {
+	setupTestDB(t)
+
+	w := call(DeleteAutomationHandler, http.MethodDelete, "/api/automations/9999", "",
+		gin.Params{{Key: "id", Value: "9999"}})
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+// Enable/disable is its own endpoint rather than a PUT of the whole rule: the
+// list screen toggles a switch without holding the rest of the rule, and
+// round-tripping the full body just to flip a boolean is how a stale client
+// silently reverts someone else's edit.
+func TestSetAutomationEnabled_TogglesWithoutTouchingTheRest(t *testing.T) {
+	setupTestDB(t)
+	seedDefaultServer(t)
+	id := newRule(t, "liga desliga")
+
+	reloaded := 0
+	SetEngineReloader(func() error { reloaded++; return nil })
+	t.Cleanup(func() { SetEngineReloader(nil) })
+
+	w := call(SetAutomationEnabledHandler, http.MethodPost, "/api/automations/1/enabled",
+		`{"enabled":false}`, gin.Params{{Key: "id", Value: strconv.Itoa(id)}})
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	got, _ := automation.GetRule(id)
+	if got.Enabled {
+		t.Error("the rule is still enabled")
+	}
+	if got.Name != "liga desliga" || len(got.Actions) != 1 {
+		t.Errorf("toggling enabled changed the rest of the rule: %+v", got)
+	}
+	if reloaded != 1 {
+		t.Errorf("expected one reload, got %d", reloaded)
+	}
+
+	w = call(SetAutomationEnabledHandler, http.MethodPost, "/api/automations/1/enabled",
+		`{"enabled":true}`, gin.Params{{Key: "id", Value: strconv.Itoa(id)}})
+	if w.Code != http.StatusOK {
+		t.Fatalf("re-enable: expected 200, got %d", w.Code)
+	}
+	if got, _ := automation.GetRule(id); !got.Enabled {
+		t.Error("the rule did not come back on")
+	}
+}
+
+func TestSetAutomationEnabled_404sForAnUnknownRule(t *testing.T) {
+	setupTestDB(t)
+
+	w := call(SetAutomationEnabledHandler, http.MethodPost, "/api/automations/9999/enabled",
+		`{"enabled":false}`, gin.Params{{Key: "id", Value: "9999"}})
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}

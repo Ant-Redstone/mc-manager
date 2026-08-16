@@ -218,3 +218,52 @@ func UpdateAutomationHandler(c *gin.Context) {
 	reloadEngine()
 	c.JSON(http.StatusOK, types.APIResponse{Success: true, Data: rule})
 }
+
+func DeleteAutomationHandler(c *gin.Context) {
+	id, ok := idParam(c, "automation")
+	if !ok {
+		return
+	}
+	if _, err := automation.GetRule(id); errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, types.APIResponse{Error: "automation not found"})
+		return
+	}
+	if err := automation.DeleteRule(id); err != nil {
+		c.JSON(http.StatusInternalServerError, types.APIResponse{Error: err.Error()})
+		return
+	}
+	reloadEngine()
+	c.JSON(http.StatusOK, types.APIResponse{Success: true})
+}
+
+// SetAutomationEnabledHandler is its own endpoint rather than a PUT of the
+// whole rule. The list screen toggles a switch without holding the rest of the
+// rule loaded, and round-tripping a full body just to flip a boolean is how a
+// stale client silently reverts someone else's edit.
+func SetAutomationEnabledHandler(c *gin.Context) {
+	id, ok := idParam(c, "automation")
+	if !ok {
+		return
+	}
+	if _, err := automation.GetRule(id); errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, types.APIResponse{Error: "automation not found"})
+		return
+	}
+
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	// A pointer, so an absent field is rejected instead of silently reading as
+	// false -- "disable" is not a safe default for a request that forgot to say.
+	if err := c.ShouldBindJSON(&body); err != nil || body.Enabled == nil {
+		c.JSON(http.StatusBadRequest, types.APIResponse{Error: "enabled must be true or false"})
+		return
+	}
+
+	if err := automation.SetRuleEnabled(id, *body.Enabled); err != nil {
+		c.JSON(http.StatusInternalServerError, types.APIResponse{Error: err.Error()})
+		return
+	}
+	reloadEngine()
+	c.JSON(http.StatusOK, types.APIResponse{Success: true, Data: gin.H{"enabled": *body.Enabled}})
+}

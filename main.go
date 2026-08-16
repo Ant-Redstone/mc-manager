@@ -207,6 +207,8 @@ func newRouter() *gin.Engine {
 	// which is why the built-in Moderator role gets view and not manage.
 	api.POST("/automations", perm(types.PermAutomationsManage), handlers.CreateAutomationHandler)
 	api.PUT("/automations/:id", perm(types.PermAutomationsManage), handlers.UpdateAutomationHandler)
+	api.DELETE("/automations/:id", perm(types.PermAutomationsManage), handlers.DeleteAutomationHandler)
+	api.POST("/automations/:id/enabled", perm(types.PermAutomationsManage), handlers.SetAutomationEnabledHandler)
 
 	// Minecraft account linking (self-service, no extra permission beyond login)
 	api.GET("/me/mclink", handlers.GetMcLinkHandler)
