@@ -209,6 +209,9 @@ func newRouter() *gin.Engine {
 	api.PUT("/automations/:id", perm(types.PermAutomationsManage), handlers.UpdateAutomationHandler)
 	api.DELETE("/automations/:id", perm(types.PermAutomationsManage), handlers.DeleteAutomationHandler)
 	api.POST("/automations/:id/enabled", perm(types.PermAutomationsManage), handlers.SetAutomationEnabledHandler)
+	api.POST("/automation-webhooks", perm(types.PermAutomationsManage), handlers.CreateAutomationWebhookHandler)
+	api.DELETE("/automation-webhooks/:id", perm(types.PermAutomationsManage), handlers.DeleteAutomationWebhookHandler)
+	api.POST("/automation-webhooks/:id/test", perm(types.PermAutomationsManage), handlers.SendAutomationWebhookTestHandler)
 
 	// Minecraft account linking (self-service, no extra permission beyond login)
 	api.GET("/me/mclink", handlers.GetMcLinkHandler)

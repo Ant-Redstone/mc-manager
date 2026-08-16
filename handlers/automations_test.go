@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -398,6 +399,232 @@ func TestSetAutomationEnabled_404sForAnUnknownRule(t *testing.T) {
 
 	w := call(SetAutomationEnabledHandler, http.MethodPost, "/api/automations/9999/enabled",
 		`{"enabled":false}`, gin.Params{{Key: "id", Value: "9999"}})
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+func newWebhook(t *testing.T, name string) int {
+	t.Helper()
+	id, err := automation.CreateWebhook(automation.Webhook{
+		Name: name, URL: "https://discord.com/api/webhooks/123456789/abcdefTOKEN",
+	})
+	if err != nil {
+		t.Fatalf("CreateWebhook: %v", err)
+	}
+	return id
+}
+
+// Storing an arbitrary URL would turn this endpoint into a request forwarder:
+// anyone with automations.manage could point a rule at an internal address and
+// read the status code back off the webhook list.
+func TestCreateWebhook_RejectsAnythingButADiscordWebhookURL(t *testing.T) {
+	setupTestDB(t)
+
+	for _, bad := range []string{
+		"http://evil.example/collect",
+		"https://discord.com/api/webhooks",
+		"https://discord.com.evil.example/api/webhooks/1/tok",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://localhost:8080/api/users",
+		"not a url at all",
+		"",
+		"file:///etc/passwd",
+	} {
+		body := fmt.Sprintf(`{"name":"x","url":%q}`, bad)
+		w := call(CreateAutomationWebhookHandler, http.MethodPost, "/api/automation-webhooks", body, nil)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("expected %q to be rejected, got %d", bad, w.Code)
+		}
+	}
+}
+
+// The create response must not echo the URL back either -- devtools and a
+// proxy log are both places it should never appear.
+func TestCreateWebhook_ResponseDoesNotEchoTheURL(t *testing.T) {
+	setupTestDB(t)
+	const secret = "https://discord.com/api/webhooks/123456789/SUPERSECRETTOKEN"
+
+	w := call(CreateAutomationWebhookHandler, http.MethodPost, "/api/automation-webhooks",
+		fmt.Sprintf(`{"name":"alertas","url":%q}`, secret), nil)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "SUPERSECRETTOKEN") {
+		t.Errorf("the create response echoed the credential: %s", w.Body.String())
+	}
+}
+
+// A rule saved against a destination that does not exist looks configured and
+// fails at fire time -- and with stop_on_failure (the default) it takes every
+// action after it down too.
+func TestCreateAutomation_RejectsAnUnknownWebhook(t *testing.T) {
+	setupTestDB(t)
+	seedDefaultServer(t)
+
+	body := `{"server_id":"default","name":"avisa","trigger_kind":"stop","trigger_config":{},
+	          "actions":[{"type":"discord","webhook_id":4242,"message":"caiu"}]}`
+
+	w := call(CreateAutomationHandler, http.MethodPost, "/api/automations", body, nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a webhook that does not exist, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// And the same rule against a real destination must save.
+	hookID := newWebhook(t, "alertas")
+	ok := fmt.Sprintf(`{"server_id":"default","name":"avisa","trigger_kind":"stop","trigger_config":{},
+	          "actions":[{"type":"discord","webhook_id":%d,"message":"caiu"}]}`, hookID)
+	if w := call(CreateAutomationHandler, http.MethodPost, "/api/automations", ok, nil); w.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for a real webhook, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// Deleting a destination a rule depends on must refuse, not silently break the
+// rule. [warn on Discord] -> [restart] with a dead webhook means the restart
+// never happens, and nothing connects that to the deletion days earlier.
+func TestDeleteWebhook_RefusesWhileARuleStillUsesIt(t *testing.T) {
+	setupTestDB(t)
+	seedDefaultServer(t)
+	hookID := newWebhook(t, "alertas")
+
+	if _, err := automation.CreateRule(automation.Rule{
+		ServerID: "default", Name: "avisa e reinicia", Enabled: true,
+		TriggerKind: "tps", TriggerConfig: map[string]any{},
+		Actions: []automation.Action{
+			{Type: "discord", WebhookID: hookID, Message: "TPS baixo"},
+			{Type: "restart", Warnings: []int{60, 10}},
+		},
+	}); err != nil {
+		t.Fatalf("CreateRule: %v", err)
+	}
+
+	w := call(DeleteAutomationWebhookHandler, http.MethodDelete, "/api/automation-webhooks/1", "",
+		gin.Params{{Key: "id", Value: strconv.Itoa(hookID)}})
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	// The operator has to be told WHICH rule, or the refusal is just a wall.
+	if !strings.Contains(w.Body.String(), "avisa e reinicia") {
+		t.Errorf("the refusal must name the rules still using it, got %s", w.Body.String())
+	}
+	if hooks, _ := automation.ListWebhooks(); len(hooks) != 1 {
+		t.Error("the webhook was deleted despite the refusal")
+	}
+}
+
+func TestDeleteWebhook_RemovesAnUnusedOne(t *testing.T) {
+	setupTestDB(t)
+	hookID := newWebhook(t, "sem uso")
+
+	w := call(DeleteAutomationWebhookHandler, http.MethodDelete, "/api/automation-webhooks/1", "",
+		gin.Params{{Key: "id", Value: strconv.Itoa(hookID)}})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if hooks, _ := automation.ListWebhooks(); len(hooks) != 0 {
+		t.Errorf("the webhook survived: %+v", hooks)
+	}
+}
+
+func TestDeleteWebhook_404sForAnUnknownWebhook(t *testing.T) {
+	setupTestDB(t)
+
+	w := call(DeleteAutomationWebhookHandler, http.MethodDelete, "/api/automation-webhooks/9999", "",
+		gin.Params{{Key: "id", Value: "9999"}})
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+// The delivery test has to send a real request, or it proves nothing an admin
+// cares about. httptest stands in for Discord so the assertion is about our
+// side: the recorded result matches what actually happened.
+func TestSendWebhookTest_RecordsARefusalAsARefusal(t *testing.T) {
+	setupTestDB(t)
+
+	discord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message": "Invalid Webhook Token"}`, http.StatusUnauthorized)
+	}))
+	t.Cleanup(discord.Close)
+
+	// Inserted through the store, not the handler: the handler only accepts
+	// real discord.com URLs, which is the point of the other test.
+	id, err := automation.CreateWebhook(automation.Webhook{Name: "quebrado", URL: discord.URL})
+	if err != nil {
+		t.Fatalf("CreateWebhook: %v", err)
+	}
+
+	w := call(SendAutomationWebhookTestHandler, http.MethodPost, "/api/automation-webhooks/1/test", "",
+		gin.Params{{Key: "id", Value: strconv.Itoa(id)}})
+
+	// 200 with success:false. The API worked; Discord refused. A 5xx here would
+	// say our server broke, which is a different thing to go debug.
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "401") {
+		t.Errorf("the response must say what Discord answered, got %s", w.Body.String())
+	}
+
+	hooks, _ := automation.ListWebhooks()
+	if len(hooks) != 1 {
+		t.Fatalf("expected one webhook, got %d", len(hooks))
+	}
+	// This is what stops the list showing an untested destination as green.
+	if hooks[0].LastStatus == nil || *hooks[0].LastStatus != http.StatusUnauthorized {
+		t.Errorf("expected the 401 to be recorded, got %+v", hooks[0].LastStatus)
+	}
+	if hooks[0].LastError == nil || !strings.Contains(*hooks[0].LastError, "Invalid Webhook Token") {
+		t.Errorf("expected Discord's own explanation to be recorded, got %+v", hooks[0].LastError)
+	}
+	if strings.Contains(w.Body.String(), discord.URL) {
+		t.Error("the destination URL leaked into the response")
+	}
+}
+
+func TestSendWebhookTest_RecordsASuccess(t *testing.T) {
+	setupTestDB(t)
+
+	var got struct{ contentType string }
+	discord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.contentType = r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(discord.Close)
+
+	id, err := automation.CreateWebhook(automation.Webhook{Name: "bom", URL: discord.URL})
+	if err != nil {
+		t.Fatalf("CreateWebhook: %v", err)
+	}
+
+	w := call(SendAutomationWebhookTestHandler, http.MethodPost, "/api/automation-webhooks/1/test", "",
+		gin.Params{{Key: "id", Value: strconv.Itoa(id)}})
+
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"success":true`) {
+		t.Fatalf("expected a success, got %d: %s", w.Code, w.Body.String())
+	}
+	if got.contentType != "application/json" {
+		t.Errorf("expected a JSON post, got %q", got.contentType)
+	}
+	hooks, _ := automation.ListWebhooks()
+	if hooks[0].LastStatus == nil || *hooks[0].LastStatus != http.StatusNoContent {
+		t.Errorf("expected 204 recorded, got %+v", hooks[0].LastStatus)
+	}
+	if hooks[0].LastError != nil && *hooks[0].LastError != "" {
+		t.Errorf("a success recorded an error: %v", *hooks[0].LastError)
+	}
+}
+
+func TestSendWebhookTest_404sForAnUnknownWebhook(t *testing.T) {
+	setupTestDB(t)
+
+	w := call(SendAutomationWebhookTestHandler, http.MethodPost, "/api/automation-webhooks/9999/test", "",
+		gin.Params{{Key: "id", Value: "9999"}})
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", w.Code)

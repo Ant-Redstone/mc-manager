@@ -295,3 +295,38 @@ func ListFirings(ruleID, limit int) ([]Firing, error) {
 	}
 	return out, rows.Err()
 }
+
+// WebhookExists reports whether a destination id is real. ValidateAction can
+// only check that a Discord action names SOME webhook -- it is a pure function
+// with no database -- so this is what stops a rule from being saved pointing at
+// a destination that was never created or has since been deleted.
+func WebhookExists(id int) (bool, error) {
+	var n int
+	err := db.DB.QueryRow(`SELECT COUNT(*) FROM automation_webhooks WHERE id = ?`, id).Scan(&n)
+	return n > 0, err
+}
+
+// RulesUsingWebhook returns the rules whose action list references this
+// destination.
+//
+// This exists so deleting a webhook can refuse rather than quietly break
+// things: a rule whose Discord step fails stops there when stop_on_failure is
+// set, which is the default. In the design's own example -- warn on Discord,
+// then restart -- deleting the destination would mean the restart silently
+// never happens, and the operator has no reason to connect the two.
+func RulesUsingWebhook(webhookID int) ([]Rule, error) {
+	rules, err := ListRules()
+	if err != nil {
+		return nil, err
+	}
+	var using []Rule
+	for _, r := range rules {
+		for _, a := range r.Actions {
+			if a.Type == "discord" && a.WebhookID == webhookID {
+				using = append(using, r)
+				break
+			}
+		}
+	}
+	return using, nil
+}

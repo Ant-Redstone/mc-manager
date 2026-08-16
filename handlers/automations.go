@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -135,6 +136,22 @@ func (r automationRequest) toRule() (automation.Rule, error) {
 	}
 	if err := automation.ValidateActions(r.Actions); err != nil {
 		return automation.Rule{}, err
+	}
+	// ValidateActions can only check that a Discord action names SOME webhook:
+	// it is a pure function with no database. A rule pointing at a destination
+	// that does not exist looks configured and fails at fire time, taking every
+	// action after it down with stop_on_failure set.
+	for i, a := range r.Actions {
+		if a.Type != "discord" {
+			continue
+		}
+		exists, err := automation.WebhookExists(a.WebhookID)
+		if err != nil {
+			return automation.Rule{}, err
+		}
+		if !exists {
+			return automation.Rule{}, fmt.Errorf("action %d: that Discord destination no longer exists", i+1)
+		}
 	}
 	if r.CooldownSeconds < 0 || r.DeafWindowSeconds < 0 {
 		return automation.Rule{}, errors.New("cooldown and deaf window cannot be negative")
@@ -266,4 +283,129 @@ func SetAutomationEnabledHandler(c *gin.Context) {
 	}
 	reloadEngine()
 	c.JSON(http.StatusOK, types.APIResponse{Success: true, Data: gin.H{"enabled": *body.Enabled}})
+}
+
+// discordWebhookURL is the only shape accepted. Storing an arbitrary URL would
+// make this endpoint a request forwarder: anyone with automations.manage could
+// point it at an internal address -- a metadata service, another container, the
+// panel itself -- and read the status code back off the webhook list. Matching
+// Discord's own format is a whitelist, which is the only reliable way to say no
+// to that; a blocklist of private ranges loses to DNS.
+var discordWebhookURL = regexp.MustCompile(`^https://(?:canary\.|ptb\.)?discord\.com/api/webhooks/\d+/[\w-]+$`)
+
+func CreateAutomationWebhookHandler(c *gin.Context) {
+	var body struct {
+		Name string `json:"name"`
+		URL  string `json:"url"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, types.APIResponse{Error: "invalid request body"})
+		return
+	}
+	name, url := strings.TrimSpace(body.Name), strings.TrimSpace(body.URL)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, types.APIResponse{Error: "a webhook needs a name"})
+		return
+	}
+	if !discordWebhookURL.MatchString(url) {
+		c.JSON(http.StatusBadRequest, types.APIResponse{
+			Error: "that is not a Discord webhook URL. Copy it from Server Settings > Integrations > Webhooks",
+		})
+		return
+	}
+
+	id, err := automation.CreateWebhook(automation.Webhook{Name: name, URL: url})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, types.APIResponse{Error: err.Error()})
+		return
+	}
+	// Only the id and name go back. Webhook.URL is json:"-", but echoing the
+	// request body would defeat that from the other direction.
+	c.JSON(http.StatusCreated, types.APIResponse{
+		Success: true,
+		Data:    automation.Webhook{ID: id, Name: name},
+	})
+}
+
+// DeleteAutomationWebhookHandler refuses while a rule still points at the
+// destination. Deleting it anyway would not disable those rules -- it would
+// make their Discord step fail at fire time, and with stop_on_failure (the
+// default) every action after it is skipped. The design's own example is
+// [warn on Discord] -> [restart]: the restart would silently stop happening,
+// with nothing linking that to a deletion days earlier.
+func DeleteAutomationWebhookHandler(c *gin.Context) {
+	id, ok := idParam(c, "webhook")
+	if !ok {
+		return
+	}
+	exists, err := automation.WebhookExists(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, types.APIResponse{Error: err.Error()})
+		return
+	}
+	if !exists {
+		c.JSON(http.StatusNotFound, types.APIResponse{Error: "webhook not found"})
+		return
+	}
+
+	using, err := automation.RulesUsingWebhook(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, types.APIResponse{Error: err.Error()})
+		return
+	}
+	if len(using) > 0 {
+		names := make([]string, 0, len(using))
+		for _, r := range using {
+			names = append(names, r.Name)
+		}
+		// Naming them matters: a bare refusal leaves the operator hunting
+		// through every rule to find which one is holding it.
+		c.JSON(http.StatusConflict, types.APIResponse{
+			Error: "still used by: " + strings.Join(names, ", ") + ". Change or remove those actions first",
+		})
+		return
+	}
+
+	if err := automation.DeleteWebhook(id); err != nil {
+		c.JSON(http.StatusInternalServerError, types.APIResponse{Error: err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, types.APIResponse{Success: true})
+}
+
+// SendAutomationWebhookTestHandler sends one real message so an admin can
+// confirm a destination before a rule depends on it. Named Send... rather than
+// Test... because a function starting with Test in this package reads as a test
+// helper.
+func SendAutomationWebhookTestHandler(c *gin.Context) {
+	id, ok := idParam(c, "webhook")
+	if !ok {
+		return
+	}
+	url, err := automation.WebhookURL(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, types.APIResponse{Error: "webhook not found"})
+		return
+	}
+
+	status, postErr := automation.PostDiscord(url, "Teste do mc-manager: este destino esta funcionando.", "")
+	// Recorded either way. An untested destination and a destination that
+	// answered 401 must not look the same on the list.
+	if err := automation.RecordWebhookResult(id, status, errText(postErr)); err != nil {
+		slog.Error("automations: failed to record a webhook test result", "webhook", id, "err", err)
+	}
+	if postErr != nil {
+		// 200 with an error, not a 5xx: our side worked, Discord refused. A 5xx
+		// would send the admin looking for a fault in the panel.
+		c.JSON(http.StatusOK, types.APIResponse{Error: postErr.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, types.APIResponse{Success: true})
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
