@@ -511,6 +511,11 @@ func TestDeleteWebhook_RefusesWhileARuleStillUsesIt(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "avisa e reinicia") {
 		t.Errorf("the refusal must name the rules still using it, got %s", w.Body.String())
 	}
+	// Quoted, because a rule name can contain a comma -- an unquoted list of
+	// "TPS baixo, Servidor caiu, avisa" reads as three rules when it is two.
+	if !strings.Contains(w.Body.String(), `\"avisa e reinicia\"`) {
+		t.Errorf("the names must be quoted so a comma in one cannot split it, got %s", w.Body.String())
+	}
 	if hooks, _ := automation.ListWebhooks(); len(hooks) != 1 {
 		t.Error("the webhook was deleted despite the refusal")
 	}

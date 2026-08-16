@@ -354,14 +354,17 @@ func DeleteAutomationWebhookHandler(c *gin.Context) {
 		return
 	}
 	if len(using) > 0 {
+		// Quoted, because a rule name can contain a comma. "still used by:
+		// TPS no chao, Servidor caiu, avisa" reads as three rules when it is
+		// two, and the operator goes looking for one that does not exist.
 		names := make([]string, 0, len(using))
 		for _, r := range using {
-			names = append(names, r.Name)
+			names = append(names, strconv.Quote(r.Name))
 		}
-		// Naming them matters: a bare refusal leaves the operator hunting
-		// through every rule to find which one is holding it.
+		// Naming them matters at all: a bare refusal leaves the operator
+		// hunting through every rule to find which one is holding it.
 		c.JSON(http.StatusConflict, types.APIResponse{
-			Error: "still used by: " + strings.Join(names, ", ") + ". Change or remove those actions first",
+			Error: "still used by " + strings.Join(names, ", ") + ". Change or remove those actions first",
 		})
 		return
 	}
