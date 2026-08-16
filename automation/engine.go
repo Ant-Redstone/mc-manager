@@ -86,12 +86,62 @@ func (e *Engine) ReloadRules() error {
 	}
 
 	e.mu.Lock()
+	// The engine's per-rule state is keyed by rule ID, and a reload happens on
+	// every write -- so state accumulated before an edit would be read after
+	// it. Anything left in `stale` below either vanished from the rule set
+	// (deleted, or disabled) or had its trigger changed, and its held-for clock
+	// and deaf window describe a condition that no longer exists.
+	//
+	// Dropped per rule, not wholesale: clearing everything on every reload
+	// would be simpler and wrong, because creating one rule would silently
+	// restart another rule's five-minute held-for clock with nothing to say
+	// why it took ten.
+	stale := make(map[int]Rule, len(e.rules))
+	for _, r := range e.rules {
+		stale[r.ID] = r
+	}
+	for _, r := range rules {
+		if before, ok := stale[r.ID]; ok && sameTrigger(before, r) {
+			delete(stale, r.ID)
+		}
+	}
+	for id := range stale {
+		delete(e.state.ConditionSince, id)
+		delete(e.state.DeafUntil, id)
+		delete(e.state.FiringsThisMinute, id)
+		// InFlight is deliberately NOT cleared. It is owned by a running action
+		// chain and cleared when that chain finishes; clearing it here would let
+		// a second chain start while the first is still going -- two overlapping
+		// restarts, each with its own warning countdown.
+	}
+
 	e.rules = rules
 	if known != nil {
 		e.state.KnownPlayers = known
 	}
 	e.mu.Unlock()
 	return nil
+}
+
+// sameTrigger reports whether two versions of a rule describe the same
+// condition, which is what decides whether the state accumulated under the old
+// one still means anything. Deaf window counts: it is armed as an absolute
+// deadline, so shortening it from ten minutes to five has to take effect on the
+// window already running, not just the next one.
+func sameTrigger(before, after Rule) bool {
+	if before.TriggerKind != after.TriggerKind ||
+		before.DeafWindowSeconds != after.DeafWindowSeconds {
+		return false
+	}
+	b, berr := json.Marshal(before.TriggerConfig)
+	a, aerr := json.Marshal(after.TriggerConfig)
+	if berr != nil || aerr != nil {
+		// Two configs that cannot be compared are treated as different.
+		// Dropping state is always the safe direction: the cost is one delayed
+		// firing, and the cost of keeping it is a firing that should not happen.
+		return false
+	}
+	return string(b) == string(a)
 }
 
 func anyRuleNeedsKnownPlayers(rules []Rule) bool {
@@ -292,7 +342,22 @@ func (e *Engine) fire(r Rule, d Decision) {
 			slog.Error("automation: failed to record last_fired_at", "rule", r.ID, "err", err)
 		}
 
-		results := RunActions(r, d.Vars, run, e.sleep)
+		// {time} is in the design's variable table, and no matcher populated it:
+		// every trigger wants the clock and none of them has a reason to know
+		// about it. Added here rather than in eleven matcher branches, and
+		// added UNDER what the matcher produced so a trigger that ever carries
+		// its own "time" keeps it.
+		//
+		// This is not cosmetic. Interpolate leaves an unknown name literal --
+		// right for a typo, and exactly wrong here: a message written with the
+		// documented variable shipped with "{time}" visible in it.
+		vars := make(map[string]string, len(d.Vars)+1)
+		vars["time"] = stamp.Format("15:04:05")
+		for k, v := range d.Vars {
+			vars[k] = v
+		}
+
+		results := RunActions(r, vars, run, e.sleep)
 
 		// Only a rule that writes to the console can hear itself.
 		if r.DeafWindowSeconds > 0 && usesConsole(r) {

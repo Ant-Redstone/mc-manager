@@ -423,3 +423,63 @@ func TestEngine_ReloadKeepsStateOfARuleThatDidNotChange(t *testing.T) {
 		t.Errorf("an unrelated rule's creation restarted this rule's held-for clock: backups=%d", run.backups)
 	}
 }
+
+// {time} is in the design's variable table and in this package's own fixtures,
+// and nothing ever populated it. Interpolate leaves an unknown name literal by
+// design -- correct for a typo, wrong here: every Discord message written with
+// the documented variable would have shipped with "{time}" in it.
+func TestEngine_EveryFiringCarriesTheClock(t *testing.T) {
+	setupTestDB(t)
+	run := &fakeRunner{running: true}
+
+	if _, err := CreateRule(consoleRuleFor("caiu",
+		Action{Type: "command", Command: "say aconteceu as {time}"})); err != nil {
+		t.Fatalf("CreateRule: %v", err)
+	}
+
+	e := newTestEngine(run)
+	at := time.Date(2026, 1, 1, 17, 45, 12, 0, time.UTC)
+	e.now = func() time.Time { return at }
+	if err := e.ReloadRules(); err != nil {
+		t.Fatalf("ReloadRules: %v", err)
+	}
+
+	e.HandleEvent(types.ConsoleLineEvent{ServerID: "default", Line: "o servidor caiu", At: at})
+	e.waitIdle()
+
+	if len(run.commands) != 1 {
+		t.Fatalf("expected the rule to fire, got %v", run.commands)
+	}
+	if run.commands[0] != "say aconteceu as 17:45:12" {
+		t.Errorf("got %q", run.commands[0])
+	}
+}
+
+// A trigger that already provides a variable keeps its own value: the clock is
+// added to what the matcher produced, not over it.
+func TestEngine_TheClockDoesNotOverwriteATriggersOwnVariables(t *testing.T) {
+	setupTestDB(t)
+	run := &fakeRunner{running: true}
+
+	if _, err := CreateRule(consoleRuleFor("morreu",
+		Action{Type: "command", Command: "say {server} viu: {line}. as {time}"})); err != nil {
+		t.Fatalf("CreateRule: %v", err)
+	}
+
+	e := newTestEngine(run)
+	at := time.Date(2026, 1, 1, 9, 5, 0, 0, time.UTC)
+	e.now = func() time.Time { return at }
+	if err := e.ReloadRules(); err != nil {
+		t.Fatalf("ReloadRules: %v", err)
+	}
+
+	e.HandleEvent(types.ConsoleLineEvent{ServerID: "default", Line: "alguem morreu", At: at})
+	e.waitIdle()
+
+	if len(run.commands) != 1 {
+		t.Fatalf("expected the rule to fire, got %v", run.commands)
+	}
+	if run.commands[0] != "say default viu: alguem morreu. as 09:05:00" {
+		t.Errorf("got %q", run.commands[0])
+	}
+}
