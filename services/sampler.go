@@ -1,6 +1,10 @@
 package services
 
 import (
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/lomokwa/mc-manager/types"
@@ -60,28 +64,114 @@ func StartSampler(needs func(types.SampleKind) bool) func() {
 
 func sampleOnce(needs func(types.SampleKind) bool) {
 	wantPlayers := needs(types.SamplePlayerCount)
-	if !wantPlayers {
-		// TPS and disk are gated the same way once implemented; today this is
-		// the only measurement taken, so a tick with nothing to do costs one
-		// map read and returns.
+	wantTPS := needs(types.SampleTPS)
+	wantDisk := needs(types.SampleDiskPercent)
+	if !wantPlayers && !wantTPS && !wantDisk {
+		// A tick with nothing configured costs three map reads and returns.
 		return
 	}
 
 	for _, rt := range AllRuntimes() {
+		if wantDisk {
+			// Disk is measured even for a stopped server: it fills up whether
+			// or not the JVM is running, and a full disk is the reason backups
+			// start failing.
+			if pct, err := DiskPercentUsed(rt.Dir); err == nil {
+				types.Bus.Publish(types.SampleEvent{
+					ServerID: rt.ID, Kind: types.SampleDiskPercent, Value: pct, At: time.Now(),
+				})
+			}
+		}
+
 		if !rt.IsServerRunning() {
-			continue // asking a stopped server for its player list is pointless
+			continue // asking a stopped server anything else is pointless
 		}
-		// Reuses GetOnlinePlayers' existing 10s cache rather than opening a
-		// second path to `list`.
-		names, err := rt.GetOnlinePlayers()
-		if err != nil {
-			continue
+
+		if wantPlayers {
+			// Reuses GetOnlinePlayers' existing 10s cache rather than opening
+			// a second path to `list`.
+			if names, err := rt.GetOnlinePlayers(); err == nil {
+				types.Bus.Publish(types.SampleEvent{
+					ServerID: rt.ID, Kind: types.SamplePlayerCount,
+					Value: float64(len(names)), At: time.Now(),
+				})
+			}
 		}
-		types.Bus.Publish(types.SampleEvent{
-			ServerID: rt.ID,
-			Kind:     types.SamplePlayerCount,
-			Value:    float64(len(names)),
-			At:       time.Now(),
-		})
+
+		if wantTPS {
+			if tps, err := rt.FetchTPS(); err == nil {
+				types.Bus.Publish(types.SampleEvent{
+					ServerID: rt.ID, Kind: types.SampleTPS, Value: tps, At: time.Now(),
+				})
+			}
+		}
+	}
+}
+
+// sparkTPSLine matches a spark TPS reading: at least two comma-separated
+// decimals, each optionally starred when that window is degraded.
+//
+// It is anchored to the START of the payload (after spark's optional bolt tag)
+// and requires the whole line to be the reading. Chat is
+// "[HH:MM:SS] [Server thread/INFO]: <Name> text", so a player typing
+// "1.0, 2.0, 3.0, 4.0, 5.0" must not be readable as a catastrophic TPS -- that
+// would be a player able to trigger a rule that restarts the server.
+var sparkTPSLine = regexp.MustCompile(`^(?:\[⚡\]\s*)?\*?(\d+\.\d+)(?:,\s*\*?\d+\.\d+){1,}$`)
+
+// ParseSparkTPS reads the shortest (5s) window from a spark tps reply, which is
+// the one that reacts fast enough to alert on.
+func ParseSparkTPS(line string) (float64, bool) {
+	m := sparkTPSLine.FindStringSubmatch(strings.TrimSpace(line))
+	if m == nil {
+		return 0, false
+	}
+	v, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+// FetchTPS runs `spark tps` and reads the reply off this runtime's hub, the
+// same shape fetchOnlinePlayers uses for `list`.
+//
+// This is the measurement that costs the JVM rather than the API, which is why
+// nothing calls it unless an enabled rule asked for TPS.
+func (rt *ServerRuntime) FetchTPS() (float64, error) {
+	hub := rt.Hub
+	if hub == nil {
+		return 0, fmt.Errorf("log hub not available")
+	}
+
+	ch := hub.Subscribe()
+	defer hub.Unsubscribe(ch)
+
+	// Drain the replay buffer: a stale reading from a previous sample would
+	// otherwise be answered instantly and be minutes old.
+draining:
+	for {
+		select {
+		case <-ch:
+		default:
+			break draining
+		}
+	}
+
+	if err := rt.SendCommand("spark tps"); err != nil {
+		return 0, err
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case line := <-ch:
+			if tps, ok := ParseSparkTPS(line); ok {
+				return tps, nil
+			}
+		case <-deadline:
+			// spark may not be installed. Failing quietly is right: the rule
+			// simply never fires, rather than the sampler logging every tick.
+			return 0, fmt.Errorf("timed out waiting for a spark tps reply")
+		}
 	}
 }

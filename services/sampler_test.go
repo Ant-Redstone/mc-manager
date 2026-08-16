@@ -20,7 +20,7 @@ func TestSampleInterval_DerivesFromTheRulesOwnWindow(t *testing.T) {
 	}{
 		{5 * time.Minute, 30 * time.Second},
 		{10 * time.Minute, time.Minute},
-		{time.Minute, 10 * time.Second},  // floor
+		{time.Minute, 10 * time.Second},      // floor
 		{30 * time.Second, 10 * time.Second}, // floor
 		{0, 10 * time.Second},                // no window configured
 		{time.Hour, time.Minute},             // ceiling
@@ -107,5 +107,51 @@ func TestTailer_BacklogReplayDoesNotReachTheAutomationBus(t *testing.T) {
 	case ev := <-ch:
 		t.Errorf("a replayed backlog line reached the automation bus: %+v", ev)
 	default:
+	}
+}
+
+// Real spark output, captured from the live server (see the Performance page
+// work). Two shapes occur: `spark tps` tags every line with the bolt, and a
+// health report prints the same numbers untagged. A starred value means that
+// window is degraded, which is exactly when a TPS rule should be reading it.
+func TestParseSparkTPS_ReadsTheShortestWindow(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want float64
+		ok   bool
+	}{
+		{"header is not data", "[⚡] TPS from last 5s, 10s, 1m, 5m, 15m:", 0, false},
+		{"tagged and starred", "[⚡]  *19.8, *19.9, 20.0, 20.0, 20.0", 19.8, true},
+		{"untagged health report", " *5.2, 8.1, 15.0, 19.0, 20.0", 5.2, true},
+		{"healthy server", "[⚡]  20.0, 20.0, 20.0, 20.0, 20.0", 20.0, true},
+		{"unrelated console noise", "[12:00:00] [Server thread/INFO]: Notch joined the game", 0, false},
+		{"a single number is not a tps line", "[⚡] 19.8", 0, false},
+	}
+	for _, tc := range cases {
+		got, ok := ParseSparkTPS(tc.line)
+		if ok != tc.ok || (ok && got != tc.want) {
+			t.Errorf("%s: %q -> expected (%v, %v), got (%v, %v)", tc.name, tc.line, tc.want, tc.ok, got, ok)
+		}
+	}
+}
+
+// A player's chat message must not be readable as a TPS sample. The line is
+// player-controlled, and a fake low TPS would fire a rule that can restart the
+// server.
+func TestParseSparkTPS_ChatCannotFakeAReading(t *testing.T) {
+	hostile := "[12:00:00] [Server thread/INFO]: <Ant_Redstone> 1.0, 2.0, 3.0, 4.0, 5.0"
+	if _, ok := ParseSparkTPS(hostile); ok {
+		t.Error("a chat message was read as a TPS sample")
+	}
+}
+
+func TestDiskPercentUsed_ReportsAPlausiblePercentage(t *testing.T) {
+	pct, err := DiskPercentUsed(t.TempDir())
+	if err != nil {
+		t.Skipf("disk stat unavailable on this platform: %v", err)
+	}
+	if pct < 0 || pct > 100 {
+		t.Errorf("expected a percentage, got %v", pct)
 	}
 }
