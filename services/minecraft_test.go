@@ -184,6 +184,89 @@ func TestListPlayers_MissingUserCache(t *testing.T) {
 	}
 }
 
+func TestDeletePlayer_NotRunning_NeverLoggedIn_RemovesFromEverything(t *testing.T) {
+	setupServerDir(t)
+	clearStatusFile(t)
+	writeServerFile(t, "usercache.json", `[
+		{"uuid": "11111111-1111-1111-1111-111111111111", "name": "Alice", "expiresOn": "2099-01-01"}
+	]`)
+	writeServerFile(t, "ops.json", `[{"uuid": "11111111-1111-1111-1111-111111111111", "name": "Alice", "level": 4}]`)
+	writeServerFile(t, "whitelist.json", `[{"uuid": "11111111-1111-1111-1111-111111111111", "name": "Alice"}]`)
+
+	result, err := DefaultRuntime().DeletePlayer("11111111-1111-1111-1111-111111111111")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !result.Deopped {
+		t.Error("expected Deopped to be true")
+	}
+	if !result.Unwhitelisted {
+		t.Error("expected Unwhitelisted to be true")
+	}
+	if !result.UsercacheRemoved {
+		t.Error("expected UsercacheRemoved to be true since the player never logged in")
+	}
+	if result.Kicked {
+		t.Error("expected Kicked to be false (server not running)")
+	}
+
+	opSet, err := DefaultRuntime().loadUUIDs("ops.json")
+	if err != nil || opSet["11111111-1111-1111-1111-111111111111"] {
+		t.Errorf("expected Alice to be removed from ops.json, opSet=%v err=%v", opSet, err)
+	}
+	whitelistSet, err := DefaultRuntime().loadUUIDs("whitelist.json")
+	if err != nil || whitelistSet["11111111-1111-1111-1111-111111111111"] {
+		t.Errorf("expected Alice to be removed from whitelist.json, whitelistSet=%v err=%v", whitelistSet, err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(ServerDir, "usercache.json"))
+	if err != nil {
+		t.Fatalf("failed to read usercache.json: %v", err)
+	}
+	if strings.Contains(string(data), "Alice") {
+		t.Errorf("expected usercache.json to no longer contain Alice, got %s", data)
+	}
+}
+
+func TestDeletePlayer_NotRunning_HasLoggedIn_KeepsUsercacheEntry(t *testing.T) {
+	setupServerDir(t)
+	clearStatusFile(t)
+	writeServerFile(t, "usercache.json", `[
+		{"uuid": "11111111-1111-1111-1111-111111111111", "name": "Alice", "expiresOn": "2099-01-01"}
+	]`)
+	writeServerFile(t, "ops.json", `[{"uuid": "11111111-1111-1111-1111-111111111111", "name": "Alice", "level": 4}]`)
+	writeServerFile(t, "world/playerdata/11111111-1111-1111-1111-111111111111.dat", "fake nbt data")
+
+	result, err := DefaultRuntime().DeletePlayer("11111111-1111-1111-1111-111111111111")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !result.Deopped {
+		t.Error("expected Deopped to be true")
+	}
+	if result.UsercacheRemoved {
+		t.Error("expected UsercacheRemoved to be false since the player has actually logged in")
+	}
+
+	data, err := os.ReadFile(filepath.Join(ServerDir, "usercache.json"))
+	if err != nil {
+		t.Fatalf("failed to read usercache.json: %v", err)
+	}
+	if !strings.Contains(string(data), "Alice") {
+		t.Errorf("expected usercache.json to still contain Alice, got %s", data)
+	}
+}
+
+func TestDeletePlayer_NotFound(t *testing.T) {
+	setupServerDir(t)
+	clearStatusFile(t)
+	writeServerFile(t, "usercache.json", `[]`)
+
+	if _, err := DefaultRuntime().DeletePlayer("11111111-1111-1111-1111-111111111111"); err == nil {
+		t.Error("expected an error for an unknown uuid")
+	}
+}
+
 func TestDeleteServer_RemovesContentsButKeepsDir(t *testing.T) {
 	setupServerDir(t)
 	writeServerFile(t, "server.jar", "fake jar")

@@ -229,6 +229,106 @@ func (rt *ServerRuntime) loadUUIDs(filename string) (map[string]bool, error) {
 	return set, nil
 }
 
+// removeFromOps removes uuid from ops.json if present. It's the
+// server-not-running counterpart to sending "deop <name>" to a live server:
+// vanilla Minecraft writes this same file itself when the JVM processes a
+// live deop, so this keeps stopped-server behavior consistent with running
+// behavior.
+func (rt *ServerRuntime) removeFromOps(uuid string) (bool, error) {
+	path := filepath.Join(rt.Dir, "ops.json")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	var entries []types.OpEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return false, fmt.Errorf("failed to decode ops.json: %w", err)
+	}
+
+	out := entries[:0]
+	removed := false
+	for _, e := range entries {
+		if e.UUID == uuid {
+			removed = true
+			continue
+		}
+		out = append(out, e)
+	}
+	if !removed {
+		return false, nil
+	}
+
+	updated, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return false, fmt.Errorf("failed to encode ops.json: %w", err)
+	}
+	if err := utils.WriteFileAtomic(path, updated); err != nil {
+		return false, fmt.Errorf("failed to write ops.json: %w", err)
+	}
+	return true, nil
+}
+
+// removeFromWhitelist is removeFromOps' whitelist.json counterpart.
+func (rt *ServerRuntime) removeFromWhitelist(uuid string) (bool, error) {
+	path := filepath.Join(rt.Dir, "whitelist.json")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	var entries []types.WhitelistEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return false, fmt.Errorf("failed to decode whitelist.json: %w", err)
+	}
+
+	out := entries[:0]
+	removed := false
+	for _, e := range entries {
+		if e.UUID == uuid {
+			removed = true
+			continue
+		}
+		out = append(out, e)
+	}
+	if !removed {
+		return false, nil
+	}
+
+	updated, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return false, fmt.Errorf("failed to encode whitelist.json: %w", err)
+	}
+	if err := utils.WriteFileAtomic(path, updated); err != nil {
+		return false, fmt.Errorf("failed to write whitelist.json: %w", err)
+	}
+	return true, nil
+}
+
+// hasPlayerLoggedIn reports whether uuid has actually connected to this
+// server at least once. usercache.json alone isn't proof of that: vanilla
+// Minecraft adds a usercache entry the moment it resolves a name to a UUID
+// (e.g. for a whitelist/op add by name), well before the player ever joins.
+// Player data on disk only exists after a real join, so its presence is
+// used as the real signal instead.
+func (rt *ServerRuntime) hasPlayerLoggedIn(uuid string) bool {
+	levelName := "world"
+	if props, err := rt.GetServerProperties(); err == nil {
+		if v, ok := props["level-name"]; ok && v != "" {
+			levelName = v
+		}
+	}
+	path := filepath.Join(rt.Dir, levelName, "playerdata", uuid+".dat")
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // listResponseLine matches vanilla's own "/list" reply, anchored to the real leading
 // "[HH:MM:SS] [Server thread/INFO]: " prefix a genuine server-generated console line always carries. The
 // previous strings.Contains(line, "players online:") check also matched that exact substring inside a
@@ -371,6 +471,98 @@ func (rt *ServerRuntime) ListPlayers() ([]types.Player, error) {
 		})
 	}
 	return players, nil
+}
+
+// DeletePlayer fully removes a player from this server. If the server is
+// running, it kicks them (if currently online), deops them, and removes
+// them from the whitelist via live console commands, so the running JVM's
+// own in-memory state and the files it owns stay in sync. If the server is
+// stopped, there's no JVM to send commands to, so ops.json/whitelist.json
+// are edited directly instead. Either way, the usercache.json entry itself
+// is only removed if the player has never actually joined -- see
+// hasPlayerLoggedIn -- since a player who has joined has other traces
+// (playerdata, stats) that reference their UUID/name, and pruning the
+// usercache entry for someone real risks orphaning those references.
+func (rt *ServerRuntime) DeletePlayer(uuid string) (types.PlayerDeletionResult, error) {
+	data, err := os.ReadFile(filepath.Join(rt.Dir, "usercache.json"))
+	if err != nil {
+		return types.PlayerDeletionResult{}, err
+	}
+
+	var userCache []types.UserCacheEntry
+	if err := json.Unmarshal(data, &userCache); err != nil {
+		return types.PlayerDeletionResult{}, fmt.Errorf("failed to decode usercache.json: %w", err)
+	}
+
+	targetIndex := -1
+	for i, player := range userCache {
+		if player.UUID == uuid {
+			targetIndex = i
+			break
+		}
+	}
+	if targetIndex == -1 {
+		return types.PlayerDeletionResult{}, fmt.Errorf("no player found with uuid %q", uuid)
+	}
+	name := userCache[targetIndex].Name
+
+	var result types.PlayerDeletionResult
+
+	if rt.IsServerRunning() {
+		online, err := rt.GetOnlinePlayers()
+		if err != nil {
+			slog.Warn("delete player: could not check online status", "err", err)
+		}
+		for _, n := range online {
+			if n == name {
+				if err := rt.SendCommand("kick " + name); err != nil {
+					slog.Warn("delete player: failed to kick", "name", name, "err", err)
+				} else {
+					result.Kicked = true
+				}
+				break
+			}
+		}
+
+		if err := rt.SendCommand("deop " + name); err != nil {
+			slog.Warn("delete player: failed to deop", "name", name, "err", err)
+		} else {
+			result.Deopped = true
+		}
+
+		if err := rt.SendCommand("whitelist remove " + name); err != nil {
+			slog.Warn("delete player: failed to remove from whitelist", "name", name, "err", err)
+		} else {
+			result.Unwhitelisted = true
+		}
+	} else {
+		deopped, err := rt.removeFromOps(uuid)
+		if err != nil {
+			return types.PlayerDeletionResult{}, err
+		}
+		result.Deopped = deopped
+
+		unwhitelisted, err := rt.removeFromWhitelist(uuid)
+		if err != nil {
+			return types.PlayerDeletionResult{}, err
+		}
+		result.Unwhitelisted = unwhitelisted
+	}
+
+	if !rt.hasPlayerLoggedIn(uuid) {
+		userCache = append(userCache[:targetIndex], userCache[targetIndex+1:]...)
+
+		updated, err := json.MarshalIndent(userCache, "", "  ")
+		if err != nil {
+			return result, fmt.Errorf("failed to encode usercache.json: %w", err)
+		}
+		if err := utils.WriteFileAtomic(filepath.Join(rt.Dir, "usercache.json"), updated); err != nil {
+			return result, fmt.Errorf("failed to write usercache.json: %w", err)
+		}
+		result.UsercacheRemoved = true
+	}
+
+	return result, nil
 }
 
 // GetServerProperties reads and parses this runtime's own server.properties
