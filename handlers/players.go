@@ -20,3 +20,19 @@ func ListPlayersHandler(c *gin.Context) {
 
 	c.JSON(http.StatusOK, types.APIResponse{Success: true, Data: players})
 }
+
+func DeletePlayersHandler(c *gin.Context) {
+	slog.Debug("delete player request received")
+
+	uuid := c.Param("uuid")
+
+	rt := runtimeFromRequest(c)
+	player, err := rt.DeletePlayer(uuid)
+	if err != nil {
+		slog.Error("failed to delete player", "err", err)
+		c.JSON(http.StatusInternalServerError, types.APIResponse{Error: err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, types.APIResponse{Success: true, Data: player})
+}

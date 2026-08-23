@@ -373,6 +373,45 @@ func (rt *ServerRuntime) ListPlayers() ([]types.Player, error) {
 	return players, nil
 }
 
+func (rt *ServerRuntime) DeletePlayer(uuid string) ([]types.UserCacheEntry, error) {
+	data, err := os.ReadFile(filepath.Join(rt.Dir, "usercache.json"))
+	if err != nil {
+		return nil, err
+	}
+
+	var userCache []types.UserCacheEntry
+	if err := json.Unmarshal(data, &userCache); err != nil {
+		return nil, fmt.Errorf("failed to decode usercache.json: %w", err)
+	}
+
+	targetIndex := -1
+	for i, player := range userCache {
+		if player.UUID == uuid {
+			targetIndex = i
+			break
+		}
+	}
+
+	if targetIndex == -1 {
+		return nil, fmt.Errorf("no player found with uuid %q", uuid)
+	}
+
+	if targetIndex != -1 {
+		userCache = append(userCache[:targetIndex], userCache[targetIndex+1:]...)
+
+		updated, err := json.MarshalIndent(userCache, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode usercache.json: %w", err)
+		}
+
+		if err := os.WriteFile(filepath.Join(rt.Dir, "usercache.json"), updated, 0644); err != nil {
+			return nil, fmt.Errorf("failed to write usercache.json: %w", err)
+		}
+	}
+
+	return userCache, nil
+}
+
 // GetServerProperties reads and parses this runtime's own server.properties
 // file (comments and blank lines skipped), rooted at rt.Dir rather than the
 // fixed ServerDir constant -- see PLAN-multi-server.md D4.

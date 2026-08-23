@@ -134,6 +134,7 @@ func newRouter() *gin.Engine {
 	api.POST("/start", perm(types.PermServerStart), handlers.StartServerHandler)
 	api.POST("/stop", perm(types.PermServerStop), handlers.StopServerHandler)
 	api.GET("/players", perm(types.PermPlayersView), handlers.ListPlayersHandler)
+	api.DELETE("/players/:uuid", perm(types.PermPlayersModerate), handlers.DeletePlayersHandler)
 	api.GET("/properties", perm(types.PermSettingsView), handlers.GetServerPropertiesHandler)
 	api.PATCH("/properties", perm(types.PermSettingsEdit), handlers.UpdateServerPropertiesHandler)
 	api.GET("/users", perm(types.PermAdminManageUsers), handlers.GetUsersHandler)
