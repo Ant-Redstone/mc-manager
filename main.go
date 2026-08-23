@@ -189,7 +189,17 @@ func newRouter() *gin.Engine {
 	// anyway). Filenames are server-generated and unguessable (see
 	// services.SaveAvatar), not sequential, so listing this route reveals
 	// nothing beyond "some image exists at this random name".
-	r.Static("/avatars", services.AvatarDir)
+	//
+	// Registered directly on r (not on the `api` group above), so it does NOT
+	// pick up that group's ValidateJWT middleware despite the "/api" prefix --
+	// Gin only applies a group's middleware to routes registered through that
+	// group, never by path-prefix matching. The "/api" prefix itself is load-
+	// bearing for real deployments, though: a reverse proxy that forwards
+	// "/api/*" to this backend and everything else to the frontend's static
+	// files (a common setup, e.g. Caddy in front of the SPA) would otherwise
+	// route "/avatars/*" to the frontend instead of here, which is exactly
+	// what happened before this route moved under "/api".
+	r.Static("/api/avatars", services.AvatarDir)
 
 	// Console WebSocket
 	api.GET("/console", perm(types.PermConsoleRead), handlers.ConsoleHandler)
