@@ -42,6 +42,29 @@ func TestInit_MigrationIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestInit_UsersHasProfileColumns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	if err := Init(dbPath); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+	defer DB.Close()
+
+	if _, err := DB.Exec("INSERT INTO users (username, password_hash) VALUES (?, ?)", "dana", "hash"); err != nil {
+		t.Fatalf("failed to insert user: %v", err)
+	}
+
+	var displayName, avatarFilename string
+	err := DB.QueryRow("SELECT display_name, avatar_filename FROM users WHERE username = ?", "dana").
+		Scan(&displayName, &avatarFilename)
+	if err != nil {
+		t.Fatalf("expected display_name/avatar_filename columns to exist and default to '': %v", err)
+	}
+	if displayName != "" || avatarFilename != "" {
+		t.Errorf("expected both columns to default to empty string, got display_name=%q avatar_filename=%q", displayName, avatarFilename)
+	}
+}
+
 func TestInit_InsertAndQueryRoundTrip(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 

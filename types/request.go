@@ -26,3 +26,10 @@ type LoginRequest struct {
 	Username string `json:"username" binding:"required"`
 	Password string `json:"password" binding:"required"`
 }
+
+// UpdateProfileRequest carries a caller's edits to their own profile.
+// DisplayName is the only field so far; an empty string clears it back to
+// falling through to Username on display.
+type UpdateProfileRequest struct {
+	DisplayName string `json:"display_name"`
+}

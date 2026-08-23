@@ -84,3 +84,17 @@ func boolVal() func(string) error {
 		return nil
 	}
 }
+
+// ValidateDisplayName restricts profile display names to a reasonable length
+// with no control characters, the same free-text-field guard as
+// ValidateServerProperties above (a newline in a display name has no
+// injection consequence here, but it renders badly and cheap to reject).
+func ValidateDisplayName(name string) error {
+	if len(name) > 32 {
+		return fmt.Errorf("display name must be 32 characters or fewer")
+	}
+	if strings.ContainsAny(name, "\r\n\t") {
+		return fmt.Errorf("display name must not contain control characters")
+	}
+	return nil
+}
