@@ -167,11 +167,11 @@ func UpdateDisplayName(userID int, displayName string) error {
 }
 
 // avatarURL turns a stored avatar_filename into the path the frontend fetches
-// it from (see the /avatars static route in main.go). Empty stays empty so
-// types.User's `omitempty` hides it entirely for users with no avatar.
+// it from (see the /api/avatars static route in main.go). Empty stays empty
+// so types.User's `omitempty` hides it entirely for users with no avatar.
 func avatarURL(filename string) string {
 	if filename == "" {
 		return ""
 	}
-	return "/avatars/" + filename
+	return "/api/avatars/" + filename
 }
