@@ -12,14 +12,14 @@ type Player struct {
 type UserCacheEntry struct {
 	UUID      string `json:"uuid"`
 	Name      string `json:"name"`
-	ExpiresOn string `json:"expires_on"`
+	ExpiresOn string `json:"expiresOn"`
 }
 
 type OpEntry struct {
 	UUID                string `json:"uuid"`
 	Name                string `json:"name"`
 	Level               int    `json:"level"`
-	BypassesPlayerLimit bool   `json:"bypasses_player_limit"`
+	BypassesPlayerLimit bool   `json:"bypassesPlayerLimit"`
 }
 
 type BannedPlayerEntry struct {
@@ -34,4 +34,14 @@ type BannedPlayerEntry struct {
 type WhitelistEntry struct {
 	UUID string `json:"uuid"`
 	Name string `json:"name"`
+}
+
+// PlayerDeletionResult reports which of a DeletePlayer call's sub-actions
+// actually took effect, since not all of them always apply (e.g. a player
+// who was never op'd has nothing to deop).
+type PlayerDeletionResult struct {
+	Kicked           bool `json:"kicked"`
+	Deopped          bool `json:"deopped"`
+	Unwhitelisted    bool `json:"unwhitelisted"`
+	UsercacheRemoved bool `json:"usercache_removed"`
 }
