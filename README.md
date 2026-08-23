@@ -54,6 +54,7 @@ The `minecraft-server/` directory is bind-mounted into both containers so world 
 | `./minecraft-server` | `/mc` | `minecraft` | Same directory, from the JVM's side |
 | `./data` | `/app/data` | `mc-manager` | SQLite database |
 | `./backups` | `/app/backups` | `mc-manager` | World backup archives |
+| `./avatars` | `/app/avatars` | `mc-manager` | User profile pictures |
 
 ### Ports
 

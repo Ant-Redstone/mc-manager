@@ -65,6 +65,41 @@ func GetMeHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, types.APIResponse{Success: true, Data: user})
 }
 
+// UpdateProfileHandler lets the caller edit their own profile -- self-service,
+// no admin.manage_users permission needed, same pattern as GetMeHandler and
+// the mclink endpoints below.
+func UpdateProfileHandler(c *gin.Context) {
+	userID, ok := middleware.UserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, types.APIResponse{Error: "missing or invalid session"})
+		return
+	}
+
+	var req types.UpdateProfileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: "invalid request body"})
+		return
+	}
+
+	if err := types.ValidateDisplayName(req.DisplayName); err != nil {
+		c.JSON(http.StatusBadRequest, types.APIResponse{Success: false, Error: err.Error()})
+		return
+	}
+
+	if err := services.UpdateDisplayName(userID, req.DisplayName); err != nil {
+		slog.Error("failed to update display name", "err", err)
+		c.JSON(http.StatusInternalServerError, types.APIResponse{Success: false, Error: "failed to update profile"})
+		return
+	}
+
+	user, err := services.GetUserByID(userID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, types.APIResponse{Error: "user not found"})
+		return
+	}
+	c.JSON(http.StatusOK, types.APIResponse{Success: true, Data: user})
+}
+
 func GetUsersHandler(c *gin.Context) {
 	users, err := services.GetUsers()
 	if err != nil {

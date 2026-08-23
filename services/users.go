@@ -122,7 +122,7 @@ func Login(req types.LoginRequest) (string, error) {
 }
 
 func GetUsers() ([]types.User, error) {
-	rows, err := db.DB.Query("SELECT id, username, created_at FROM users")
+	rows, err := db.DB.Query("SELECT id, username, display_name, avatar_filename, created_at FROM users")
 	if err != nil {
 		return nil, err
 	}
@@ -130,10 +130,14 @@ func GetUsers() ([]types.User, error) {
 
 	var users []types.User
 	for rows.Next() {
-		var u types.User
-		if err := rows.Scan(&u.ID, &u.Username, &u.CreatedAt); err != nil {
+		var (
+			u        types.User
+			avatarFN string
+		)
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &avatarFN, &u.CreatedAt); err != nil {
 			return nil, err
 		}
+		u.AvatarURL = avatarURL(avatarFN)
 		users = append(users, u)
 	}
 
@@ -145,8 +149,29 @@ func GetUsers() ([]types.User, error) {
 // user_roles (SQLite doesn't enforce the FK by default) and to echo back
 // whose permissions were just changed.
 func GetUserByID(id int) (types.User, error) {
-	var u types.User
-	err := db.DB.QueryRow("SELECT id, username, created_at FROM users WHERE id = ?", id).
-		Scan(&u.ID, &u.Username, &u.CreatedAt)
+	var (
+		u        types.User
+		avatarFN string
+	)
+	err := db.DB.QueryRow("SELECT id, username, display_name, avatar_filename, created_at FROM users WHERE id = ?", id).
+		Scan(&u.ID, &u.Username, &u.DisplayName, &avatarFN, &u.CreatedAt)
+	u.AvatarURL = avatarURL(avatarFN)
 	return u, err
+}
+
+// UpdateDisplayName sets the caller-facing name shown instead of Username.
+// An empty string clears it back to falling through to Username.
+func UpdateDisplayName(userID int, displayName string) error {
+	_, err := db.DB.Exec("UPDATE users SET display_name = ? WHERE id = ?", displayName, userID)
+	return err
+}
+
+// avatarURL turns a stored avatar_filename into the path the frontend fetches
+// it from (see the /avatars static route in main.go). Empty stays empty so
+// types.User's `omitempty` hides it entirely for users with no avatar.
+func avatarURL(filename string) string {
+	if filename == "" {
+		return ""
+	}
+	return "/avatars/" + filename
 }

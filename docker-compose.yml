@@ -43,6 +43,7 @@ services:
       - ./minecraft-server:/app/minecraft-server
       - ./data:/app/data
       - ./backups:/app/backups
+      - ./avatars:/app/avatars
     env_file:
       - .env
     restart: unless-stopped

@@ -157,6 +157,9 @@ func newRouter() *gin.Engine {
 	api.PUT("/backups/config", perm(types.PermBackupsCreate), handlers.UpdateBackupConfigHandler)
 
 	api.GET("/me", handlers.GetMeHandler)
+	api.PATCH("/me", handlers.UpdateProfileHandler)
+	api.POST("/me/avatar", handlers.UploadAvatarHandler)
+	api.DELETE("/me/avatar", handlers.DeleteAvatarHandler)
 
 	// Permissions & roles
 	api.GET("/permissions/schema", handlers.PermissionSchemaHandler)
@@ -180,6 +183,13 @@ func newRouter() *gin.Engine {
 	r.GET("/api/invitations/:token", handlers.ValidateInvitationHandler)
 	r.POST("/api/register", handlers.RegisterHandler)
 	r.POST("/api/login", handlers.LoginHandler)
+
+	// Profile pictures: served statically and unauthenticated, like any other
+	// avatar image (a browser <img> tag can't attach an Authorization header
+	// anyway). Filenames are server-generated and unguessable (see
+	// services.SaveAvatar), not sequential, so listing this route reveals
+	// nothing beyond "some image exists at this random name".
+	r.Static("/avatars", services.AvatarDir)
 
 	// Console WebSocket
 	api.GET("/console", perm(types.PermConsoleRead), handlers.ConsoleHandler)

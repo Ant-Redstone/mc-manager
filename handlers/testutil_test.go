@@ -67,6 +67,37 @@ func setupBackupDir(t *testing.T) string {
 	return services.BackupDir
 }
 
+// setupAvatarDir creates services.AvatarDir fresh for a test and removes it
+// during cleanup.
+func setupAvatarDir(t *testing.T) string {
+	t.Helper()
+	if err := os.RemoveAll(services.AvatarDir); err != nil {
+		t.Fatalf("failed to clear avatar dir: %v", err)
+	}
+	if err := os.MkdirAll(services.AvatarDir, 0755); err != nil {
+		t.Fatalf("failed to create avatar dir: %v", err)
+	}
+	t.Cleanup(func() {
+		os.RemoveAll(services.AvatarDir)
+	})
+	return services.AvatarDir
+}
+
+// readDirNames lists file names in dir, for tests asserting exactly which
+// files (e.g. avatar uploads) were left behind.
+func readDirNames(t *testing.T, dir string) ([]string, error) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names, nil
+}
+
 // setupTestDB points db.DB at a fresh temp-file sqlite database so tests that
 // exercise the DB-backed services don't touch any real database.
 func setupTestDB(t *testing.T) {
